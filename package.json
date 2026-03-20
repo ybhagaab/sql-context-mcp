@@ -1,0 +1,59 @@
+{
+  "name": "sql-context-presets-mcp",
+  "version": "1.3.0",
+  "description": "MCP Server for SQL Client - Execute queries on PostgreSQL/Redshift databases with IAM, Secrets Manager, and schema context presets",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "sql-context-presets-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "prepublishOnly": "npm run build",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "sql",
+    "postgresql",
+    "redshift",
+    "database",
+    "model-context-protocol",
+    "iam",
+    "aws",
+    "secrets-manager",
+    "schema-context",
+    "ai",
+    "llm"
+  ],
+  "author": "Abhilash Bhagat",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ybhagaab/sql-context-preset-mcp"
+  },
+  "dependencies": {
+    "@aws-sdk/client-redshift": "^3.490.0",
+    "@aws-sdk/client-s3": "^3.490.0",
+    "@aws-sdk/client-secrets-manager": "^3.490.0",
+    "@modelcontextprotocol/sdk": "^1.25.0",
+    "pg": "^8.11.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.6",
+    "@types/pg": "^8.10.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
