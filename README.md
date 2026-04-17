@@ -1,6 +1,22 @@
 # SQL Context Presets MCP Server
 
+[![npm version](https://img.shields.io/npm/v/sql-context-presets-mcp.svg)](https://www.npmjs.com/package/sql-context-presets-mcp)
+[![npm downloads](https://img.shields.io/npm/dm/sql-context-presets-mcp.svg)](https://www.npmjs.com/package/sql-context-presets-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 An MCP server that lets any AI assistant query your database with zero prior knowledge. Schema context is loaded on-demand via presets — no steering files, no training, no wasted tokens. Point it at your database, drop in a context file, and your assistant understands your schema immediately.
+
+## Install
+
+```bash
+npm install -g sql-context-presets-mcp
+```
+
+Or run directly with npx (no install needed):
+
+```bash
+npx -y sql-context-presets-mcp
+```
 
 ## Quick Start
 
