@@ -15,9 +15,8 @@
  * - Response content sanitization (hidden character stripping)
  * - Response size limits
  */
-import { Pool, PoolClient } from 'pg';
+import { Pool } from 'pg';
 export declare function __setTestConnectionState(state: {
-    client?: PoolClient | null;
     pool?: Pool | null;
     iamCredentialsCache?: {
         user: string;
@@ -26,7 +25,6 @@ export declare function __setTestConnectionState(state: {
     } | null;
 }): void;
 export declare function __getTestConnectionState(): {
-    client: PoolClient | null;
     pool: Pool | null;
     iamCredentialsCache: {
         user: string;
@@ -36,7 +34,25 @@ export declare function __getTestConnectionState(): {
 };
 export declare function buildSSLConfig(): boolean | object;
 export declare function isConnectionLevelError(error: unknown): boolean;
-export declare function ensureConnection(): Promise<PoolClient>;
+/**
+ * Returns the active connection pool, creating it if needed.
+ *
+ * Replaces the previous `ensureConnection(): Promise<PoolClient>` single-cached-client pattern:
+ * callers now run queries via `pool.query()`, which checks a client out PER QUERY, so concurrent
+ * MCP tool calls genuinely execute in parallel (up to `max` connections) instead of serializing
+ * on one shared client.
+ *
+ * The old per-reuse `SELECT 1` liveness check does not map to a pool (each query may get a
+ * different pooled connection, and pg provides no checkout-time validation hook); staleness is
+ * instead handled reactively by `executeQuery()`'s bounded retry: a connection-level failure
+ * discards the WHOLE pool (covering the "every idle connection died while the laptop slept"
+ * case) and the retry rebuilds it fresh. `keepAlive` remains enabled as proactive mitigation.
+ *
+ * IAM credential expiry is preserved as an independent recycling trigger: the pool's config
+ * captures the password at creation time, so once the cached IAM credentials expire the pool
+ * must be discarded before it mints any new connection with the stale password.
+ */
+export declare function ensurePool(): Promise<Pool>;
 export declare function executeQuery(sql: string, params?: any[]): Promise<{
     columns: string[];
     rows: any[][];

@@ -44,6 +44,8 @@ No installation needed — just add to your MCP client config:
 ## Features
 
 - Execute SQL queries with formatted results
+- Concurrent query execution: each query checks a connection out of a pool (up to `SQL_POOL_MAX`, default 10), so parallel tool calls run in parallel instead of queueing on one connection
+- Automatic reconnect-and-retry on connection-level failures (bounded, with backoff)
 - Browse schemas, tables, and columns
 - Multiple authentication methods (Direct, IAM, Secrets Manager)
 - SSL/TLS support with multiple modes
@@ -250,6 +252,7 @@ JSON (`my-schema.json`):
 | `SQL_SECRET_ID` | SM | - | Secrets Manager secret name/ARN |
 | `SQL_AWS_REGION` | IAM/SM | `us-east-1` | AWS region |
 | `SQL_AWS_PROFILE` | No | - | AWS profile name |
+| `SQL_POOL_MAX` | No | `10` | Max pooled connections = max concurrent queries |
 | `SQL_SSL_MODE` | No | `require` | SSL mode |
 | `SQL_SSL_CA` | No | - | CA certificate path |
 | `SQL_SSL_CERT` | No | - | Client certificate path |

@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.4.0
+
+### Changed — Concurrent query execution
+
+Previously every query was funneled through one shared cached database connection. node-postgres
+serializes queries issued on a single connection through an internal queue, so N concurrent MCP
+tool calls executed one-by-one — concurrent callers silently waited in line, and long queries
+could push later ones past client-side timeouts.
+
+- **Per-query connection checkout.** `run_query` and the other database tools now check a
+  connection out of a pool per query (`pool.query()`), so concurrent tool calls genuinely run in
+  parallel on separate connections.
+- **New `SQL_POOL_MAX` environment variable.** Controls the pool size — the maximum number of
+  simultaneously executing queries. Defaults to 10; invalid values fall back to 10.
+- **Reliability behavior preserved.** The 1.3.1 fixes carry over: bounded reconnect-and-retry on
+  connection-level errors (now discarding and rebuilding the whole pool, with the drain running
+  in the background so retries never wait on other in-flight queries), IAM credential-expiry
+  recycling, TCP keepalive, process-level crash guards, and no retries for SQL/validation errors.
+- **Fixed pool-discard connection leak.** Error-recovery paths previously dropped the pool
+  reference without closing it; discarded pools are now always drained.
+- **Cleaner published artifacts.** Test files are no longer compiled into `dist/`.
+
 ## 1.3.1
 
 ### Fixed — Connection reliability

@@ -23,7 +23,7 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from '@modelcontextprotocol/sdk/types.js';
-import { Pool, PoolClient } from 'pg';
+import { Pool } from 'pg';
 import { ZodError } from 'zod';
 import { listPresetsAsync, getPresetAsync } from './presets/index.js';
 import {
@@ -43,32 +43,39 @@ import {
   truncateString,
 } from './validation/sanitizer.js';
 
+// Connection pooling state. Queries check a client out of `pool` per call (`pool.query()`), so
+// concurrent MCP tool calls execute on separate connections in parallel (up to the pool's `max`)
+// instead of serializing on a single shared cached client.
 let pool: Pool | null = null;
-let client: PoolClient | null = null;
+// Creation-race guard: when multiple concurrent queries find `pool === null`, only one
+// `createPool()` runs; the rest await the same in-flight promise instead of racing to create (and
+// leak) extra pools.
+let creatingPool: Promise<Pool> | null = null;
 let iamCredentialsCache: { user: string; password: string; expiry: number } | null = null;
 
 // NOTE: `__setTestConnectionState`/`__getTestConnectionState` are additive test-only seams for the
 // mcp-server-connection-reliability bugfix spec's property-based bug-condition/preservation tests
 // (see opensource/src/index.stale-connection.exploration.test.ts). They allow injecting a mocked
-// cached `client`/`pool` and `iamCredentialsCache` expiry state before calling the exported
-// `ensureConnection()`, without changing any production code path: nothing in `main()` or the tool
-// handlers ever calls these functions, so normal CLI/bin execution behavior is unchanged.
+// `pool` and `iamCredentialsCache` expiry state before calling the exported `ensurePool()`,
+// without changing any production code path: nothing in `main()` or the tool handlers ever calls
+// these functions, so normal CLI/bin execution behavior is unchanged. Setting `pool` also clears
+// any in-flight `creatingPool` promise so each test starts from a deterministic state.
 export function __setTestConnectionState(state: {
-  client?: PoolClient | null;
   pool?: Pool | null;
   iamCredentialsCache?: { user: string; password: string; expiry: number } | null;
 }): void {
-  if ('client' in state) client = state.client ?? null;
-  if ('pool' in state) pool = state.pool ?? null;
+  if ('pool' in state) {
+    pool = state.pool ?? null;
+    creatingPool = null;
+  }
   if ('iamCredentialsCache' in state) iamCredentialsCache = state.iamCredentialsCache ?? null;
 }
 
 export function __getTestConnectionState(): {
-  client: PoolClient | null;
   pool: Pool | null;
   iamCredentialsCache: { user: string; password: string; expiry: number } | null;
 } {
-  return { client, pool, iamCredentialsCache };
+  return { pool, iamCredentialsCache };
 }
 
 type AuthMethod = 'direct' | 'iam' | 'secrets_manager';
@@ -141,7 +148,7 @@ async function getIAMCredentials(): Promise<{ user: string; password: string }> 
 // NOTE: Exported as an additive test-only seam for the mcp-server-connection-reliability bugfix
 // spec's property-based bug-condition/preservation tests (see
 // opensource/src/index.ssl-config.exploration.test.ts), mirroring the same minimal-seam precedent
-// used for `ensureConnection()`/`executeQuery()`. No production call site changes: `main()` and
+// used for `ensurePool()`/`executeQuery()`. No production call site changes: `main()` and
 // the tool handlers still reach this function only via `getConnectionConfig()`.
 export function buildSSLConfig(): boolean | object {
   const sslMode = process.env.SQL_SSL_MODE || 'require';
@@ -182,9 +189,17 @@ export function buildSSLConfig(): boolean | object {
   return sslConfig;
 }
 
+// Pool sizing: how many connections (and therefore how many truly concurrent queries) the pool
+// may open. Overridable via SQL_POOL_MAX; defaults to pg's own default of 10.
+function getPoolMax(): number {
+  const parsed = parseInt(process.env.SQL_POOL_MAX || '', 10);
+  if (Number.isFinite(parsed) && parsed >= 1) return parsed;
+  return 10;
+}
+
 async function getConnectionConfig(): Promise<{
   host: string; port: number; database: string; user: string; password: string; ssl: boolean | object;
-  keepAlive: boolean; keepAliveInitialDelayMillis: number;
+  keepAlive: boolean; keepAliveInitialDelayMillis: number; max: number;
 }> {
   const authMethod = (process.env.SQL_AUTH_METHOD || 'direct').toLowerCase() as AuthMethod;
   let host = process.env.SQL_HOST;
@@ -214,6 +229,7 @@ async function getConnectionConfig(): Promise<{
   return {
     host, port, database, user, password, ssl: buildSSLConfig(),
     keepAlive: true, keepAliveInitialDelayMillis: 10000,
+    max: getPoolMax(),
   };
 }
 
@@ -222,12 +238,17 @@ const CONNECTION_LEVEL_ERROR_MESSAGE_PHRASES = [
   'Connection terminated',
   'terminated unexpectedly',
   'Client has encountered a connection error',
+  // Benign race under concurrency: a query may hold a reference to a pool that a concurrent
+  // query's failure has just discarded (drained via `pool.end()`). pg then rejects new checkouts
+  // with this message; classifying it as connection-level lets the bounded retry transparently
+  // pick up the replacement pool.
+  'Cannot use a pool after calling end',
 ];
 
 // NOTE: Exported as an additive test-only seam for the mcp-server-connection-reliability bugfix
 // spec (Task 13.1, see opensource/src/index.connection-error-classifier.test.ts and the
 // mid-query-retry/app-error-no-retry property tests), mirroring the same minimal-seam precedent
-// used for `ensureConnection()`/`executeQuery()`/`buildSSLConfig()`. Classifies an error as
+// used for `ensurePool()`/`executeQuery()`/`buildSSLConfig()`. Classifies an error as
 // connection-level (socket/connection fault, eligible for the bounded reconnect-and-retry wrapper
 // in `executeQuery()`, Task 13.2) vs application-level (ZodError, SQL syntax/constraint errors,
 // or anything else) which must never be retried.
@@ -249,49 +270,80 @@ export function isConnectionLevelError(error: unknown): boolean {
   return false;
 }
 
-export async function ensureConnection(): Promise<PoolClient> {
-  if (client) {
-    const authMethod = (process.env.SQL_AUTH_METHOD || 'direct').toLowerCase();
-    // IAM credential expiry is an independent condition that always forces recycling, regardless
-    // of whether the cached client's socket is still alive. This check must fire (and discard the
-    // client/pool) without ever attempting a liveness check against an already-doomed client.
-    const iamCredentialsExpired =
-      authMethod === 'iam' && !!iamCredentialsCache && Date.now() >= iamCredentialsCache.expiry;
-
-    if (iamCredentialsExpired) {
-      if (client) client.release();
-      if (pool) await pool.end();
-      client = null; pool = null;
-    } else {
-      // Auth-method-agnostic liveness check: a cached client is only reused if it survives a
-      // lightweight `SELECT 1`. If it throws (e.g. a dropped TCP connection), discard the stale
-      // client/pool and fall through to reconnection instead of returning a dead connection.
-      let isLive = true;
-      try {
-        await client.query('SELECT 1');
-      } catch {
-        isLive = false;
-      }
-
-      if (isLive) {
-        return client;
-      }
-
-      if (client) client.release();
-      if (pool) await pool.end();
-      client = null; pool = null;
-    }
-  }
-  const config = await getConnectionConfig();
-  pool = new Pool(config);
-  pool.on('error', (err) => {
-    console.error('[pool error]', err);
-    client = null;
+/**
+ * Discards a pool so the next `ensurePool()` call rebuilds from scratch, without blocking the
+ * caller on in-flight queries.
+ *
+ * Compare-and-swap semantics: only the FIRST discarder of the currently-active pool clears the
+ * module reference and initiates the drain. Concurrent failures on the same (already-discarded)
+ * pool, or failures on a stale pool reference after a replacement was created, are no-ops — they
+ * must never stomp a healthy replacement pool.
+ *
+ * The drain (`pool.end()`) runs in the background: it lets queries still executing on the old
+ * pool's other connections finish before their sockets close, while the caller immediately
+ * proceeds to reconnect/retry. Drain errors are logged, never thrown.
+ */
+function discardPool(failedPool: Pool): void {
+  if (pool === failedPool) {
     pool = null;
+    creatingPool = null;
+    failedPool.end().catch((err) => console.error('[pool drain error]', err));
+  }
+}
+
+async function createPool(): Promise<Pool> {
+  const config = await getConnectionConfig();
+  const newPool = new Pool(config);
+  newPool.on('error', (err) => {
+    // Background error on an idle pooled connection: log and discard this pool so the next tool
+    // call rebuilds it. Never re-throw and never exit — pg emits this for e.g. an idle socket
+    // dropped by the server, which is recoverable.
+    console.error('[pool error]', err);
+    discardPool(newPool);
   });
-  client = await pool.connect();
-  await client.query('SELECT 1');
-  return client;
+  // Eager connectivity validation, preserving the old post-connect `SELECT 1` semantics: config/
+  // auth/network problems surface here (inside executeQuery's classified retry loop) rather than
+  // on the first real query. The validated connection is returned to the pool as an idle client.
+  await newPool.query('SELECT 1');
+  pool = newPool;
+  return newPool;
+}
+
+/**
+ * Returns the active connection pool, creating it if needed.
+ *
+ * Replaces the previous `ensureConnection(): Promise<PoolClient>` single-cached-client pattern:
+ * callers now run queries via `pool.query()`, which checks a client out PER QUERY, so concurrent
+ * MCP tool calls genuinely execute in parallel (up to `max` connections) instead of serializing
+ * on one shared client.
+ *
+ * The old per-reuse `SELECT 1` liveness check does not map to a pool (each query may get a
+ * different pooled connection, and pg provides no checkout-time validation hook); staleness is
+ * instead handled reactively by `executeQuery()`'s bounded retry: a connection-level failure
+ * discards the WHOLE pool (covering the "every idle connection died while the laptop slept"
+ * case) and the retry rebuilds it fresh. `keepAlive` remains enabled as proactive mitigation.
+ *
+ * IAM credential expiry is preserved as an independent recycling trigger: the pool's config
+ * captures the password at creation time, so once the cached IAM credentials expire the pool
+ * must be discarded before it mints any new connection with the stale password.
+ */
+export async function ensurePool(): Promise<Pool> {
+  const authMethod = (process.env.SQL_AUTH_METHOD || 'direct').toLowerCase();
+  const iamCredentialsExpired =
+    authMethod === 'iam' && !!iamCredentialsCache && Date.now() >= iamCredentialsCache.expiry;
+
+  if (pool && iamCredentialsExpired) {
+    discardPool(pool);
+  }
+
+  if (pool) return pool;
+
+  if (!creatingPool) {
+    creatingPool = createPool().finally(() => {
+      creatingPool = null;
+    });
+  }
+  return creatingPool;
 }
 
 // Bounded reconnect-and-retry configuration for `executeQuery()` (mcp-server-connection-reliability
@@ -308,14 +360,22 @@ export async function executeQuery(sql: string, params?: any[]): Promise<{
   columns: string[]; rows: any[][]; rowCount: number; executionTime: number;
 }> {
   for (let attempt = 1; attempt <= MAX_QUERY_ATTEMPTS; attempt++) {
+    // The pool this attempt actually ran against, captured so the catch block discards THAT pool
+    // (compare-and-swap inside discardPool), never a replacement created by a concurrent retry.
+    let activePool: Pool | null = null;
     try {
-      // `ensureConnection()` is inside this try/catch (not just `conn.query(...)`) so that a
-      // connection-level error surfacing during reconnection itself (e.g. its own post-connect
-      // liveness check failing on a persistently dead network) is also classified and retried,
+      // `ensurePool()` is inside this try/catch (not just the query call) so that a
+      // connection-level error surfacing during pool creation itself (e.g. its eager `SELECT 1`
+      // validation failing on a persistently dead network) is also classified and retried,
       // rather than escaping the bounded retry loop early.
-      const conn = await ensureConnection();
+      activePool = await ensurePool();
       const startTime = Date.now();
-      const result = await conn.query(sql, params);
+      // Per-query checkout: `pool.query()` acquires a client from the pool, runs the query, and
+      // releases it — so concurrent executeQuery() calls run in parallel on separate connections
+      // (up to the pool's `max`) instead of serializing on one shared client. pg automatically
+      // destroys (rather than returns to the pool) a client whose query failed at the
+      // connection level.
+      const result = await activePool.query(sql, params);
       const executionTime = Date.now() - startTime;
       const columns = sanitizeColumns(result.fields.map(f => f.name));
       const rawRows = result.rows.map(row => Object.values(row));
@@ -330,12 +390,13 @@ export async function executeQuery(sql: string, params?: any[]): Promise<{
       if (!isConnectionLevelError(error)) {
         throw error;
       }
-      // Connection-level error: discard the dead client/pool so the next ensureConnection() call
-      // rebuilds both from scratch, matching the discard pattern used elsewhere in this module.
-      if (client) client.release();
-      if (pool) await pool.end();
-      client = null;
-      pool = null;
+      // Connection-level error: discard the pool this attempt used (if it is still the active
+      // one) so the next ensurePool() call rebuilds it from scratch. Discarding the WHOLE pool —
+      // not just the one dead connection — covers the case where every idle connection died
+      // together (e.g. network drop); the drain of in-flight queries happens in the background.
+      if (activePool) {
+        discardPool(activePool);
+      }
 
       // Retries exhausted: return a clear error to the caller without crashing the process.
       if (attempt >= MAX_QUERY_ATTEMPTS) {
@@ -354,7 +415,7 @@ export async function executeQuery(sql: string, params?: any[]): Promise<{
 // NOTE: Exported as an additive test-only seam for the mcp-server-connection-reliability bugfix
 // spec's property-based preservation tests (see
 // opensource/src/index.healthy-path.preservation.test.ts), mirroring the same minimal-seam
-// precedent used for `ensureConnection()`/`executeQuery()`/`buildSSLConfig()`. No production call
+// precedent used for `ensurePool()`/`executeQuery()`/`buildSSLConfig()`. No production call
 // site changes: the `CallToolRequestSchema` handler below still calls this function exactly as
 // before.
 export function formatResults(result: { columns: string[]; rows: any[][]; rowCount: number; executionTime: number }): string {
@@ -406,7 +467,7 @@ const tools: Tool[] = [
 ];
 
 const server = new Server(
-  { name: 'sql-context-presets-mcp', version: '1.3.0' },
+  { name: 'sql-context-presets-mcp', version: '1.4.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -459,8 +520,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case 'connection_status': {
         try {
-          const conn = await ensureConnection();
-          const result = await conn.query(`
+          const activePool = await ensurePool();
+          const result = await activePool.query(`
             SELECT current_database() as database, current_user as user, inet_server_addr() as host
           `);
           const row = result.rows[0];
@@ -520,12 +581,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // NOTE: Extracted from the inline `process.on('SIGINT', ...)` callback as an additive test-only
 // seam for the mcp-server-connection-reliability bugfix spec's property-based preservation tests
 // (see opensource/src/index.healthy-path.preservation.test.ts), mirroring the same minimal-seam
-// precedent used for `ensureConnection()`/`executeQuery()`/`buildSSLConfig()`/`formatResults()`.
-// The SIGINT handler below still invokes this function with the exact same release()/end()/exit()
-// call sequence as before — behavior is byte-for-byte unchanged.
+// precedent used for `ensurePool()`/`executeQuery()`/`buildSSLConfig()`/`formatResults()`.
+// Graceful shutdown: drain the pool (releasing all idle connections, letting in-flight queries
+// finish) and then exit(0). With per-query checkout there is no long-lived client to release
+// first; `pool.end()` errors are swallowed so shutdown always reaches exit(0).
 export async function handleSigint(): Promise<void> {
-  if (client) client.release();
-  if (pool) await pool.end();
+  if (pool) await pool.end().catch(() => undefined);
   process.exit(0);
 }
 
@@ -536,16 +597,15 @@ process.on('SIGINT', handleSigint);
 // These are registered at module scope (like the SIGINT handler above), so any error not caught
 // by the tool-handler try/catch or the `pool.on('error', ...)` listener — e.g. an unexpected
 // async rejection elsewhere — is logged with full context instead of crashing the process with no
-// diagnostics. Connection-level errors (per `isConnectionLevelError()`, Task 13.1) reset
-// `client`/`pool` state so the next tool call transparently reconnects, matching the discard
-// pattern used in `ensureConnection()`/`executeQuery()`. Genuinely unrecoverable (non-connection)
+// diagnostics. Connection-level errors (per `isConnectionLevelError()`, Task 13.1) discard the
+// active pool so the next tool call transparently reconnects, matching the discard pattern used
+// in `ensurePool()`/`executeQuery()`. Genuinely unrecoverable (non-connection)
 // errors still log clearly and exit the process, preserving the "unrecoverable errors still exit"
 // requirement — this guard must never degrade into "the process never exits."
 process.on('uncaughtException', (err) => {
   console.error('[uncaughtException]', err.stack || err);
   if (isConnectionLevelError(err)) {
-    client = null;
-    pool = null;
+    if (pool) discardPool(pool);
   } else {
     process.exit(1);
   }
@@ -554,8 +614,7 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason instanceof Error ? (reason.stack || reason) : reason);
   if (isConnectionLevelError(reason)) {
-    client = null;
-    pool = null;
+    if (pool) discardPool(pool);
   } else {
     process.exit(1);
   }
