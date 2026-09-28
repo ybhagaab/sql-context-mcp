@@ -206,9 +206,13 @@ const REAL_QUERY_SQL = 'SELECT * FROM nonexistent';
  * whose `query(REAL_QUERY_SQL)` always rejects with `rejectError` — so pool validation never
  * interferes with the exactly-one-attempt assertion this test makes about the actual
  * application-level (syntax/constraint) error path. */
+/** SQL text of a `pool.query()` call: a string, or a query config (`{ text, rowMode, types }`). */
+const sqlOf = (arg: unknown): string | undefined =>
+  typeof arg === 'string' ? arg : (arg as { text?: string } | null)?.text;
+
 function makeAppErrorPool(rejectError: unknown) {
-  const query = vi.fn(async (sql: string, ..._rest: unknown[]) => {
-    if (sql === 'SELECT 1') {
+  const query = vi.fn(async (sql: unknown, ..._rest: unknown[]) => {
+    if (sqlOf(sql) === 'SELECT 1') {
       return { rows: [], rowCount: 0, fields: [] };
     }
     throw rejectError;
@@ -231,7 +235,7 @@ describe('Preservation: pg syntax/constraint errors propagate through executeQue
         }
 
         // Exactly one execution attempt of the REAL query under test: no reconnect, no retry.
-        const realQueryCalls = mockPool.query.mock.calls.filter(([sql]) => sql === REAL_QUERY_SQL);
+        const realQueryCalls = mockPool.query.mock.calls.filter(([sql]) => sqlOf(sql) === REAL_QUERY_SQL);
         expect(realQueryCalls.length).toBe(1);
 
         // The original error propagates completely unchanged (same instance, same code/message).

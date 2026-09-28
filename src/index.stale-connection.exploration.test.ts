@@ -172,7 +172,7 @@ describe('Bug condition exploration: stale connections transparently replaced (P
           // is how staleness is detected), the dead pool was then discarded (drained), and the
           // caller's query transparently succeeded on a freshly built pool — the caller never
           // sees the connection-level fault.
-          expect(deadPool.query).toHaveBeenCalledWith(TEST_QUERY_SQL, undefined);
+          expect(deadPool.query).toHaveBeenCalledWith(expect.objectContaining({ text: TEST_QUERY_SQL, rowMode: 'array' }));
           expect(deadPool.end).toHaveBeenCalledTimes(1);
           expect(result).toBeDefined();
           expect(result.rowCount).toBe(0);
@@ -201,7 +201,7 @@ describe('Bug condition exploration: stale connections transparently replaced (P
 
     const result = await executeQuery(TEST_QUERY_SQL);
 
-    expect(deadPool.query).toHaveBeenCalledWith(TEST_QUERY_SQL, undefined);
+    expect(deadPool.query).toHaveBeenCalledWith(expect.objectContaining({ text: TEST_QUERY_SQL, rowMode: 'array' }));
     expect(deadPool.end).toHaveBeenCalledTimes(1);
     expect(result).toBeDefined();
     expect(__getTestConnectionState().pool).not.toBe(deadPool);
@@ -215,7 +215,7 @@ describe('Bug condition exploration: stale connections transparently replaced (P
 
     const result = await executeQuery(TEST_QUERY_SQL);
 
-    expect(deadPool.query).toHaveBeenCalledWith(TEST_QUERY_SQL, undefined);
+    expect(deadPool.query).toHaveBeenCalledWith(expect.objectContaining({ text: TEST_QUERY_SQL, rowMode: 'array' }));
     expect(deadPool.end).toHaveBeenCalledTimes(1);
     expect(result).toBeDefined();
     expect(__getTestConnectionState().pool).not.toBe(deadPool);
@@ -240,7 +240,7 @@ describe('Bug condition exploration: stale connections transparently replaced (P
 
     const result = await executeQuery(TEST_QUERY_SQL);
 
-    expect(deadPool.query).toHaveBeenCalledWith(TEST_QUERY_SQL, undefined);
+    expect(deadPool.query).toHaveBeenCalledWith(expect.objectContaining({ text: TEST_QUERY_SQL, rowMode: 'array' }));
     expect(deadPool.end).toHaveBeenCalledTimes(1);
     expect(result).toBeDefined();
     expect(__getTestConnectionState().pool).not.toBe(deadPool);

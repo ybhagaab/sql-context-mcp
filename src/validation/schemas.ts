@@ -19,11 +19,63 @@ const tableNamePattern = /^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$/;
 const schemaNamePattern = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const presetNamePattern = /^[a-zA-Z0-9_\-\.]+$/;
 
+export const PAGE_LIMITS = {
+  MAX_PAGE_ROWS: 1_000_000,
+  MIN_PAGE_CHARS: 1_000,
+} as const;
+
+const sqlSchema = z.string()
+  .min(1, 'SQL query cannot be empty')
+  .max(LIMITS.MAX_SQL_LENGTH, `SQL query exceeds maximum length of ${LIMITS.MAX_SQL_LENGTH}`)
+  .refine((sql) => !sql.includes('\x00'), 'SQL query contains null bytes');
+
+const pageFormatSchema = z.enum(['table', 'csv', 'json']).optional().default('table');
+const maxRowsSchema = z.number()
+  .int('maxRows must be an integer')
+  .min(1, 'maxRows must be at least 1')
+  .max(PAGE_LIMITS.MAX_PAGE_ROWS, `maxRows cannot exceed ${PAGE_LIMITS.MAX_PAGE_ROWS}`)
+  .optional();
+const maxCharsSchema = z.number()
+  .int('maxChars must be an integer')
+  .min(PAGE_LIMITS.MIN_PAGE_CHARS, `maxChars must be at least ${PAGE_LIMITS.MIN_PAGE_CHARS}`)
+  .optional();
+const timeoutMsSchema = z.number()
+  .int('timeoutMs must be an integer')
+  .min(0, 'timeoutMs cannot be negative')
+  .optional();
+
+export const RESULT_ID_PATTERN = /^r_[a-z2-7]{16}$/;
+export const EXPORT_ID_PATTERN = /^e_[a-z2-7]{16}$/;
+
 export const RunQueryInputSchema = z.object({
-  sql: z.string()
-    .min(1, 'SQL query cannot be empty')
-    .max(LIMITS.MAX_SQL_LENGTH, `SQL query exceeds maximum length of ${LIMITS.MAX_SQL_LENGTH}`)
-    .refine((sql) => !sql.includes('\x00'), 'SQL query contains null bytes'),
+  sql: sqlSchema,
+  format: pageFormatSchema,
+  maxRows: maxRowsSchema,
+  maxChars: maxCharsSchema,
+  timeoutMs: timeoutMsSchema,
+});
+
+export const FetchRowsInputSchema = z.object({
+  resultId: z.string().regex(RESULT_ID_PATTERN, 'Invalid resultId: use the resultId returned by run_query'),
+  format: pageFormatSchema,
+  maxRows: maxRowsSchema,
+  maxChars: maxCharsSchema,
+  offset: z.number().int('offset must be an integer').min(0, 'offset cannot be negative').optional(),
+});
+
+export const ExportQueryInputSchema = z.object({
+  sql: sqlSchema,
+  format: z.enum(['csv', 'jsonl']).optional().default('csv'),
+  fileName: z.string().max(256, 'fileName is too long').optional(),
+  wait: z.boolean().optional().default(true),
+  maxRows: z.number().int('maxRows must be an integer').min(1, 'maxRows must be at least 1').optional(),
+  maxBytes: z.number().int('maxBytes must be an integer').min(1, 'maxBytes must be at least 1').optional(),
+  timeoutMs: timeoutMsSchema,
+});
+
+export const ExportStatusInputSchema = z.object({
+  exportId: z.string().regex(EXPORT_ID_PATTERN, 'Invalid exportId: use the exportId returned by export_query'),
+  cancel: z.boolean().optional().default(false),
 });
 
 export const ListTablesInputSchema = z.object({
@@ -81,6 +133,9 @@ export const McpResponseSchema = z.object({
 });
 
 export type RunQueryInput = z.infer<typeof RunQueryInputSchema>;
+export type FetchRowsInput = z.infer<typeof FetchRowsInputSchema>;
+export type ExportQueryInput = z.infer<typeof ExportQueryInputSchema>;
+export type ExportStatusInput = z.infer<typeof ExportStatusInputSchema>;
 export type ListTablesInput = z.infer<typeof ListTablesInputSchema>;
 export type DescribeTableInput = z.infer<typeof DescribeTableInputSchema>;
 export type GetSampleDataInput = z.infer<typeof GetSampleDataInputSchema>;

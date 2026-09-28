@@ -43,7 +43,12 @@ No installation needed — just add to your MCP client config:
 
 ## Features
 
-- Execute SQL queries with formatted results
+- Execute SQL and get one page of the result, sized for model context, with the exact total row count
+- Page through large results with `fetch_rows`, without running the query again
+- Export complete results of any size to CSV or JSONL files with `export_query`
+- Output as a readable table, CSV, or typed JSON with exact values
+- Multi-statement scripts, run in order on one connection
+- Timeouts, cancellation, and progress notifications for long-running queries
 - Concurrent query execution: each query checks a connection out of a pool (up to `SQL_POOL_MAX`, default 10), so parallel tool calls run in parallel instead of queueing on one connection
 - Automatic reconnect-and-retry on connection-level failures (bounded, with backoff)
 - Browse schemas, tables, and columns
@@ -56,14 +61,130 @@ No installation needed — just add to your MCP client config:
 
 | Tool | Description |
 |------|-------------|
-| `run_query` | Execute any SQL query |
+| `run_query` | Execute SQL; returns a page of the result with the exact total |
+| `fetch_rows` | Read the next page of a result, by its `resultId` |
+| `export_query` | Stream a complete result to a CSV or JSONL file |
+| `export_status` | Check or cancel an export started with `wait: false` |
 | `list_schemas` | List all database schemas |
 | `list_tables` | List tables in a schema |
 | `describe_table` | Get column information for a table |
-| `get_sample_data` | Preview rows from a table |
+| `get_sample_data` | Preview rows from a table (up to 1,000) |
 | `connection_status` | Check connection health |
 | `get_schema_context` | Load custom schema knowledge |
 | `list_presets` | List available schema context presets |
+
+---
+
+## Working with Results
+
+### Pages and exact totals
+
+`run_query` returns as many rows as fit in a page: by default 100 rows (`maxRows`) and 100,000
+characters (`maxChars`). Every response includes the exact total row count. When more rows exist,
+it also includes a `resultId`:
+
+```
+event_date | campaign_id | installs
+-----------+-------------+---------
+...
+... (1694 more rows)
+
+1794 rows returned. (2300ms)
+More rows: fetch_rows {"resultId":"r_7k2mq4x9d3p8w1ab"}; full result: export_query
+```
+
+For analysis in chat, aggregate in SQL (`GROUP BY`, `COUNT`, `SUM`) rather than paging through raw
+rows. `maxRows` (up to 1,000,000) and `maxChars` (up to 5,000,000 by default) are meant for
+programs that load data.
+
+### Formats
+
+| `format` | Output |
+|----------|--------|
+| `table` (default) | The readable padded table shown above |
+| `csv` | Two text blocks: the CSV data (header and rows) in the first, the status lines in the second, so the first block can be parsed directly |
+| `json` | One object: `columns` (`name`, `type`), `rows` (arrays of exact values), `rowCount` (rows in this page), `offset`, `totalRows`, `hasMore`, `truncated` (same as `hasMore`), `resultId`, `executionTimeMs`, and `statements` for scripts |
+
+Values in `json` (and `jsonl` exports) are exact: `int2`, `int4`, `oid` and finite floats are
+numbers, booleans are `true`/`false`, and everything else (`int8`, `numeric`, dates, timestamps,
+intervals, `super`) is the database's text, so nothing loses precision. NULL is `null`.
+
+In CSV, NULL is an empty unquoted field and an empty string is `""`. A row whose only column is
+NULL is therefore an empty line, which some CSV readers skip. Use JSON or JSONL when NULLs must be
+exact.
+
+### Paging with `fetch_rows`
+
+`fetch_rows` takes the `resultId` and the same `format`, `maxRows` and `maxChars` options. It
+continues where the previous page ended, or starts at `offset`.
+
+- Most results are written to a local spool file in the background, and the database connection
+  is released as soon as that finishes. Any offset works.
+- A result larger than `SQL_SPOOL_THRESHOLD_BYTES` (100 MB) keeps its database cursor open instead,
+  at most `SQL_MAX_OPEN_CURSORS` (3) at a time. It can only move forward, and it closes after 15
+  minutes without a `fetch_rows` call. When every slot is taken, `run_query` still returns the first
+  page and the exact total, and suggests `export_query`.
+- Results are kept until the server restarts. Spool files share a 2 GB budget per server process;
+  the least recently used results are evicted first.
+
+### Exports with `export_query`
+
+`export_query` runs the SQL and streams the complete result to a file, with no row or size limit
+by default. The response has the file path, a schema file (`<file>.schema.json`: columns with
+names, types and OIDs, row count, size, and a SHA-256 of the SQL), the row count, size, duration,
+the columns, and a 10-row preview. The data itself isn't returned. Clients on MCP 2025-06-18 or
+later also get a `resource_link` to the file.
+
+```json
+{ "sql": "select * from events where event_date >= '2026-09-01'", "format": "jsonl", "fileName": "events" }
+```
+
+- `format`: `csv` (default) or `jsonl` (one JSON array of exact values per line).
+- `wait: false` returns an `exportId` straight away; poll `export_status` for rows and bytes
+  written, and pass `cancel: true` to stop it. At most `SQL_EXPORT_CONCURRENCY` (2) exports run at
+  once; others wait in line.
+- `maxRows` and `maxBytes` stop the export early and mark it `truncated`.
+- Exports stream without a database cursor, so Redshift's cursor size limits don't apply, and
+  memory stays flat whatever the size. Writing stops before free disk space drops below
+  `SQL_EXPORT_MIN_FREE_BYTES` (1 GB).
+- Export files hold the database's raw text. Hidden-character sanitization applies to inline
+  responses only.
+
+Files go to `SQL_EXPORT_DIR`, or by default to the OS cache folder:
+
+- macOS: `~/Library/Caches/sql-context-presets`
+- Linux: `$XDG_CACHE_HOME/sql-context-presets`, or `~/.cache/sql-context-presets`
+- Windows: `%LOCALAPPDATA%\sql-context-presets\Cache`
+
+Each server process writes into its own `<pid>-<start time>/` folder (with `exports/` and
+`spool/`), readable only by your user. At startup, the server deletes the folders of server
+processes that are no longer running. It never deletes exports at any other time, so move files you
+want to keep.
+
+### Scripts and session settings
+
+- `sql` may contain several statements separated by semicolons. They run in order on one
+  connection. The result of the last statement is shown, followed by a summary of the others
+  (`Earlier statements: SET`).
+- Scripts with `BEGIN`/`COMMIT` run exactly as written.
+- Session settings don't carry over to the next call, so put `SET` and the query in the same call.
+  A connection that ran a script, changed a setting, or was left in a transaction is closed
+  instead of being reused.
+
+### Long-running queries
+
+- Queries run as long as they need. Set `timeoutMs` on a call, or `SQL_STATEMENT_TIMEOUT_MS` as the
+  default; a statement that runs longer is cancelled on the database.
+- Cancelling a tool call in your MCP client cancels its query on the database.
+- When the client asks for progress, the server reports it every 30 seconds, which keeps clients
+  that reset their request timeout on progress waiting for 15 to 20 minute queries. If your client
+  still times out, use `export_query` with `wait: false` and poll `export_status`.
+
+### Loading data into other programs
+
+Use `export_query` with `format: "jsonl"` and read the file. For smaller results, `run_query` with
+`format: "json"` and a large `maxChars`, followed by `fetch_rows` until `hasMore` is false, also
+works.
 
 ---
 
@@ -253,6 +374,21 @@ JSON (`my-schema.json`):
 | `SQL_AWS_REGION` | IAM/SM | `us-east-1` | AWS region |
 | `SQL_AWS_PROFILE` | No | - | AWS profile name |
 | `SQL_POOL_MAX` | No | `10` | Max pooled connections = max concurrent queries |
+| `SQL_DEFAULT_MAX_ROWS` | No | `100` | Default rows per page |
+| `SQL_MAX_INLINE_CHARS` | No | `100000` | Default page budget, in characters |
+| `SQL_MAX_INLINE_CHARS_CEILING` | No | `5000000` | Largest `maxChars` a call may request |
+| `SQL_FETCH_BATCH_ROWS` | No | `5000` | Rows per cursor FETCH (at most 1,000 on single-node Redshift) |
+| `SQL_STATEMENT_TIMEOUT_MS` | No | `0` (none) | Default statement timeout for `run_query` and `export_query` |
+| `SQL_PROGRESS_INTERVAL_MS` | No | `30000` | How often progress is reported |
+| `SQL_SPOOL_THRESHOLD_BYTES` | No | `104857600` (100 MB) | Largest result that is spooled for paging rather than kept as an open cursor |
+| `SQL_SPOOL_MAX_TOTAL_BYTES` | No | `2147483648` (2 GB) | Spool budget per server process |
+| `SQL_MAX_OPEN_CURSORS` | No | `3` | Open-cursor results at once |
+| `SQL_CURSOR_IDLE_TTL_MS` | No | `900000` (15 min) | Idle time before an open cursor closes |
+| `SQL_EXPORT_CONCURRENCY` | No | `2` | Exports running at once |
+| `SQL_EXPORT_DIR` | No | OS cache folder | Base folder for exports and spool files |
+| `SQL_EXPORT_MAX_ROWS` | No | - (no limit) | Optional row cap for exports |
+| `SQL_EXPORT_MAX_BYTES` | No | - (no limit) | Optional size cap for exports |
+| `SQL_EXPORT_MIN_FREE_BYTES` | No | `1073741824` (1 GB) | Stop writing files before free disk space drops below this; `0` disables |
 | `SQL_SSL_MODE` | No | `require` | SSL mode |
 | `SQL_SSL_CA` | No | - | CA certificate path |
 | `SQL_SSL_CERT` | No | - | Client certificate path |
@@ -263,6 +399,10 @@ JSON (`my-schema.json`):
 | `SQL_CONTEXT_URL` | No | - | HTTP/HTTPS URL to context file |
 
 *Can be provided via Secrets Manager secret
+
+Invalid values fall back to the default, with a warning on stderr. Open cursors plus concurrent
+exports always leave at least one pooled connection free; if the settings don't, the server lowers
+both and logs it.
 
 ---
 
@@ -284,21 +424,37 @@ JSON (`my-schema.json`):
 - IAM auth uses temporary credentials that auto-expire
 - Secrets Manager supports automatic credential rotation
 - SSL enabled by default
+- Runs over stdio only; it opens no network port
 - Input validation via Zod schemas
-- Response sanitization strips hidden/control characters
-- Configurable limits (max 10K rows, 1MB response)
+- Response sanitization strips hidden/control characters from every inline format
+- Page budgets (100,000 characters by default, 5,000,000 at most) keep responses bounded
+- Export and spool files are written only inside a per-process folder readable by your user alone
+  (folders 0700, files 0600). Callers can't choose paths, and `fileName` is reduced to safe
+  characters. Export files contain raw data, without sanitization.
+- `run_query` runs any SQL the database user is allowed to run. Give AI assistants a read-only
+  database user.
 
 ---
 
 ## Development
 
 ```bash
-git clone https://github.com/ybhagaab/sql-context-preset-mcp
-cd sql-context-preset-mcp
+git clone https://github.com/ybhagaab/sql-context-mcp
+cd sql-context-mcp
 npm install
 npm run build
+npm test
 npm start
 ```
+
+`npm test` runs the unit, property and integration tests against an in-memory fake database.
+`npm run test:memory` runs the full memory-bound check (5 million rows through every path).
+
+`npm run test:live` runs read-only tests against a real Redshift cluster. Set
+`SQL_LIVE_TABLE=schema.table` (a small table you can read) and, for the export test,
+`SQL_LIVE_BIG_TABLE=schema.table` (at least 500,000 rows). Connection settings come from the
+`SQL_*` variables, or from an MCP client config (`SQL_LIVE_MCP_CONFIG`, default
+`~/.kiro/settings/mcp.json`, server `sql-context-presets`).
 
 ## License
 

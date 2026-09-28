@@ -105,14 +105,16 @@ function makeSlottedPool(max: number, queryDurationMs: number) {
   };
 
   const pool = {
-    query: vi.fn(async (sql: string) => {
+    // executeQuery passes a query config (`{ text, rowMode: 'array', types }`), so rows are arrays.
+    query: vi.fn(async (config: { text: string } | string) => {
+      const sql = typeof config === 'string' ? config : config.text;
       await acquireSlot();
       try {
         await sleep(queryDurationMs);
         return {
-          rows: [{ echo: sql }],
+          rows: [[sql]],
           rowCount: 1,
-          fields: [{ name: 'echo' }],
+          fields: [{ name: 'echo', dataTypeID: 25 }],
         };
       } finally {
         releaseSlot();

@@ -1,6 +1,6 @@
 {
   "name": "sql-context-presets-mcp",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "MCP Server for SQL Client - Execute queries on PostgreSQL/Redshift databases with IAM, Secrets Manager, and schema context presets",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,7 +10,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=18.0.0"
@@ -22,7 +23,9 @@
     "prepublishOnly": "npm run build",
     "prepack": "npm run build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:live": "node scripts/live-tests.cjs",
+    "test:memory": "node scripts/memory-tests.cjs"
   },
   "keywords": [
     "mcp",

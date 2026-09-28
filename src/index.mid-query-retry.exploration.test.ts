@@ -113,8 +113,10 @@ function makeRealQueryTracker() {
  * `query(REAL_QUERY_SQL)` rejects with `rejectError` for the first `failCount` attempts (counted
  * via the shared `tracker`, across however many pool objects are used), then succeeds. */
 function installQueryImpl(tracker: { attempts: number }, rejectError: unknown, failCount: number) {
-  hoisted.queryImpl = async (sql: string) => {
-    if (sql !== REAL_QUERY_SQL) {
+  hoisted.queryImpl = async (sql: unknown) => {
+    // executeQuery passes a query config (`{ text, rowMode: 'array', types }`); pool validation a string.
+    const text = typeof sql === 'string' ? sql : (sql as { text?: string } | null)?.text;
+    if (text !== REAL_QUERY_SQL) {
       // Pool validation or any other non-real-query call: always succeed so it never interferes
       // with the mid-query retry semantics under test here.
       return { rows: [], rowCount: 0, fields: [] };

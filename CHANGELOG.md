@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.5.0
+
+### Added: results of any size
+
+- **Pages with exact totals.** `run_query` returns as many rows as fit in a page (100 rows and
+  100,000 characters by default; `maxRows` and `maxChars` per call) and always reports the exact
+  total row count: from `stv_active_cursors` on Redshift, from a scroll cursor on PostgreSQL, or
+  by counting.
+- **`fetch_rows`.** Continues a result by its `resultId` without running the query again. Results
+  are spooled to a local file (any offset works), or keep their cursor open when very large
+  (forward only, at most 3 at once, closed after 15 idle minutes).
+- **`export_query` and `export_status`.** Stream a complete result to a CSV or JSONL file, with a
+  schema sidecar and a 10-row preview. No row or size limit by default, with optional caps. A
+  background mode (`wait: false`) with status and cancel, a queue of 2 concurrent exports, and a
+  free-space reserve. Exports don't use a cursor, so Redshift's cursor size limits don't apply, and
+  memory stays flat (checked with 5 million rows).
+- **Formats.** `format: "table" | "csv" | "json"`. JSON and JSONL hold exact values: numbers only
+  where lossless, and `int8`, `numeric`, dates and intervals as the database's text. CSV follows
+  RFC 4180, with NULL as an empty field.
+- **Scripts.** Several statements in one call run in order on one connection. The last result is
+  shown, with a summary of the others.
+- **Long-running queries.** A per-call `timeoutMs` and a default `SQL_STATEMENT_TIMEOUT_MS`.
+  Cancelling a tool call cancels its query on the database (protocol-level cancel, with
+  `pg_cancel_backend` as a fallback), even when every pooled connection is busy. Progress
+  notifications every 30 seconds.
+- **Server instructions** tell assistants when to aggregate in SQL, page, or export.
+- New environment variables for all of the above. Each has a default, so upgrading needs no
+  configuration change.
+
+### Fixed
+
+- The row count in the footer was wrong on Redshift, which sends no count for SELECT. It now shows
+  the exact total.
+- Duplicate or number-like column names (for example `a, a` or `"2025"`) no longer misalign rows.
+- INTERVAL and other values the driver parses into objects no longer fail the whole query. They
+  show as the database's text.
+- Multi-statement SQL no longer fails with `Cannot read properties of undefined (reading 'map')`.
+- `get_sample_data` honors its `limit` (up to 1,000) instead of showing at most 100 rows.
+- Column widths come from the rows on the page, so one wide row later in a result no longer widens
+  the table.
+- Session settings can't leak into later calls through a reused connection: a connection that ran
+  a script, changed a setting, or was left in a transaction is closed instead of reused.
+
+### Changed
+
+- A plain `{ "sql": "..." }` call keeps the same table layout. The visible differences are the
+  correct total in the footer and a `More rows: fetch_rows {...}` line when more rows exist.
+- The catalog tools (`list_schemas`, `list_tables`, `describe_table`) use the same page budget, and
+  a very large catalog pages with `fetch_rows`.
+- Session settings don't persist between calls (true in practice since 1.4.0's pool). Put `SET`
+  and the query in the same call.
+- For loading complete data into other programs, prefer `export_query` with `format: "jsonl"`.
+- Cancellation no longer uses pg's deprecated `Client.activeQuery`, so pg 8.20 prints no
+  deprecation warning.
+
 ## 1.4.0
 
 ### Changed — Concurrent query execution
