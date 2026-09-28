@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "sql-context-presets-mcp": "./dist/index.js"
+    "sql-context-presets-mcp": "dist/index.js"
   },
   "files": [
     "dist",
@@ -45,7 +45,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ybhagaab/sql-context-mcp"
+    "url": "git+https://github.com/ybhagaab/sql-context-mcp.git"
   },
   "dependencies": {
     "@aws-sdk/client-redshift": "^3.490.0",
@@ -62,5 +62,8 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3",
     "vitest": "^3.2.6"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
   }
 }
