@@ -12,9 +12,9 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { TOOLS, handleToolCall } from './tools';
 import { getRuntime, Runtime } from './runtime';
+import { SERVER_NAME, SERVER_VERSION } from './version';
 
-export const SERVER_NAME = 'sql-context-presets-mcp';
-export const SERVER_VERSION = '1.5.0';
+export { SERVER_NAME, SERVER_VERSION } from './version';
 
 export const SERVER_INSTRUCTIONS =
   'Aggregate in SQL for analysis. run_query returns a page sized for model context, with the exact total; call fetch_rows ' +

@@ -49,6 +49,7 @@ const buffered_1 = require("./db/buffered");
 const runner_1 = require("./runner");
 const progress_1 = require("./mcp/progress");
 const manager_1 = require("./export/manager");
+const version_1 = require("./version");
 const FORMAT_DESCRIPTION = 'Output format: "table" (default; readable text), "csv" (a header and rows, returned as a separate text block from the status line), ' +
     'or "json" (typed exact values with paging metadata; meant for programs).';
 const MAX_ROWS_DESCRIPTION = `Most rows to return in this page (1 to ${schemas_js_1.PAGE_LIMITS.MAX_PAGE_ROWS.toLocaleString('en-US')}; default 100). The character budget can end the page earlier.`;
@@ -180,7 +181,7 @@ function resourceLink(job) {
         uri: (0, url_1.pathToFileURL)(job.paths.finalPath).href,
         name: path.basename(job.paths.finalPath),
         mimeType: job.format === 'csv' ? 'text/csv' : 'application/x-ndjson',
-        description: `${job.rowsWritten.toLocaleString('en-US')} rows exported by sql-context-presets-mcp`,
+        description: `${job.rowsWritten.toLocaleString('en-US')} rows exported by ${version_1.SERVER_NAME}`,
     };
 }
 function progressFor(extra, runtime) {

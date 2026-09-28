@@ -26,6 +26,7 @@ import { ProgressReporter } from './mcp/progress';
 import type { RenderedPage } from './results/page';
 import type { Runtime } from './runtime';
 import { ExportJob, exportResult, exportStatus, exportProgress } from './export/manager';
+import { SERVER_NAME } from './version';
 
 const FORMAT_DESCRIPTION =
   'Output format: "table" (default; readable text), "csv" (a header and rows, returned as a separate text block from the status line), ' +
@@ -193,7 +194,7 @@ function resourceLink(job: ExportJob): Content {
     uri: pathToFileURL(job.paths.finalPath).href,
     name: path.basename(job.paths.finalPath),
     mimeType: job.format === 'csv' ? 'text/csv' : 'application/x-ndjson',
-    description: `${job.rowsWritten.toLocaleString('en-US')} rows exported by sql-context-presets-mcp`,
+    description: `${job.rowsWritten.toLocaleString('en-US')} rows exported by ${SERVER_NAME}`,
   };
 }
 

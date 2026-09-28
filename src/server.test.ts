@@ -6,6 +6,8 @@
  * Validates: Requirements 5.4, 5.5, 5.7, 6.2, 6.3, 8.4
  */
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 vi.mock('pg', async () => (await import('./test/fake-pg')).fakePgModule);
 
@@ -14,7 +16,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { fakeDb, FakePool, FakeColumn } from './test/fake-pg';
 import { setupFakeDb, makeRuntime, teardown, lazyRows, until } from './test/harness';
-import { createMcpServer, SERVER_INSTRUCTIONS, SERVER_VERSION } from './server';
+import { createMcpServer, SERVER_INSTRUCTIONS, SERVER_NAME, SERVER_VERSION } from './server';
 import type { Runtime } from './runtime';
 
 const ID_NAME: FakeColumn[] = [{ name: 'id', oid: 23 }, { name: 'name', oid: 1043 }];
@@ -68,7 +70,9 @@ describe('initialize and tools/list', () => {
   test('the server sends its instructions and version', async () => {
     const client = await connectClient(rt);
     expect(client.getInstructions()).toBe(SERVER_INSTRUCTIONS);
-    expect(client.getServerVersion()).toEqual({ name: 'sql-context-presets-mcp', version: SERVER_VERSION });
+    expect(client.getServerVersion()).toEqual({ name: SERVER_NAME, version: SERVER_VERSION });
+    // The reported version matches the package version.
+    expect(SERVER_VERSION).toBe(JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')).version);
   });
 
   test('the tool list includes the paging and export tools with their arguments', async () => {

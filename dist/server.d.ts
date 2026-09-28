@@ -4,8 +4,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { Runtime } from './runtime';
-export declare const SERVER_NAME = "sql-context-presets-mcp";
-export declare const SERVER_VERSION = "1.5.0";
+export { SERVER_NAME, SERVER_VERSION } from './version';
 export declare const SERVER_INSTRUCTIONS: string;
 export interface McpServerHandle {
     server: Server;
