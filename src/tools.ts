@@ -68,7 +68,8 @@ export const TOOLS: Tool[] = [
     description:
       'Read the next page of a result returned by run_query (or get_sample_data and the catalog tools), using its resultId. ' +
       'Continues where the previous page ended, or starts at `offset`. The query is not run again. Results are kept until the server ' +
-      'restarts; very large results keep an open cursor that can only move forward and closes after 15 idle minutes.',
+      'restarts, though the least recently used may be evicted when the spool budget is full; very large results keep an open cursor that can ' +
+      'only move forward and closes after 15 idle minutes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -86,7 +87,7 @@ export const TOOLS: Tool[] = [
     description:
       'Execute SQL and stream the complete result to a local CSV or JSONL file, with no row or size limit. Returns the file path, a ' +
       'schema file path, the row count, the file size and a 10-row preview; the data itself is not returned in the response. Use it ' +
-      'for complete datasets, for example to load into another tool. Values are written exactly as the database returns them. For ' +
+      'for complete datasets, for example to load into another tool. Values are exact and not sanitized (see format). For ' +
       'long exports pass wait: false and poll export_status.',
     inputSchema: {
       type: 'object',
@@ -96,7 +97,10 @@ export const TOOLS: Tool[] = [
           type: 'string',
           enum: ['csv', 'jsonl'],
           default: 'csv',
-          description: '"csv" (header row; NULL is an empty field) or "jsonl" (one JSON array of exact values per line; NULL is null).',
+          description:
+            '"csv" (header row; each value is the database\'s text, booleans are true/false, NULL is an empty field) or "jsonl" ' +
+            '(one JSON array per line; int2, int4 and finite floats are numbers, booleans are true/false, NULL is null, and ' +
+            'everything else, including int8, numeric and dates, is the database\'s text).',
         },
         fileName: { type: 'string', description: 'Base name for the file (letters, digits, dot, dash and underscore). A timestamp is added.' },
         wait: {

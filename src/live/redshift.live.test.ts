@@ -107,8 +107,9 @@ describe.skipIf(!LIVE_ENABLED || !TABLE)('live: Redshift', () => {
     expect(page.rowCount).toBe(Math.min(100, trueTotal));
     expect(page.hasMore).toBe(trueTotal > 100);
     const table = text(await call(rt, 'run_query', { sql: `select * from ${TABLE}` }));
-    expect(table).toMatch(new RegExp(`\\n\\n${trueTotal} rows returned\\. \\(\\d+ms\\)\\n`));
-    expect(table).toContain(`... (${trueTotal - 100} more rows)`);
+    // The paging line sits just above the footer; the footer is the last line, as in 1.4.0.
+    expect(table).toContain(`... (${trueTotal - 100} more rows)\n\nMore rows: fetch_rows {"resultId":"r_`);
+    expect(table).toMatch(new RegExp(`\\n${trueTotal} rows returned\\. \\(\\d+ms\\)$`));
   }, 120_000);
 
   test('pages joined together equal a single full read (spooled and open-cursor modes)', async () => {
