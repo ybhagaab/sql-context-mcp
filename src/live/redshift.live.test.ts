@@ -165,7 +165,7 @@ describe.skipIf(!LIVE_ENABLED || !TABLE)('live: Redshift', () => {
     const scripted = text(await call(rt, 'run_query', { sql: `set search_path to ${schema}, public; select count(*) as n from ${table}` }));
     log(`script: ${scripted.split('\n').slice(-2).join(' / ')}`);
     expect(scripted).toContain(`${trueTotal}`);
-    expect(scripted).toMatch(/Earlier statements: SET$/);
+    expect(scripted).toMatch(/Earlier statements: SET\n1 rows returned\. \(\d+ms\)$/);
     const after = text(await call(rt, 'run_query', { sql: 'show search_path' }));
     log(`search_path in the next call: ${after.split('\n')[2]?.trim()}`);
     expect(after).not.toContain(`${schema}, public`);

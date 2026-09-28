@@ -234,15 +234,20 @@ class PageBuilder {
             if (meta.hasMore) {
                 output += meta.totalRows === null ? '\n... (more rows)' : `\n... (${meta.totalRows - (meta.offset + n)} more rows)`;
             }
+            // The row-count footer stays the last line, as in 1.4.0, so programs that read it from the
+            // end of the text keep working; paging and script lines go just above it.
+            output += '\n\n';
+            if (extra.length)
+                output += `${extra.join('\n')}\n`;
             output += meta.totalRows === null
-                ? `\n\nMore than ${meta.offset + n} rows returned. (${ms}ms)`
-                : `\n\n${meta.totalRows} rows returned. (${ms}ms)`;
+                ? `More than ${meta.offset + n} rows returned. (${ms}ms)`
+                : `${meta.totalRows} rows returned. (${ms}ms)`;
         }
         else {
             output += `\n\n${rangeLine(meta, n)}`;
+            if (extra.length)
+                output += `\n${extra.join('\n')}`;
         }
-        if (extra.length)
-            output += `\n${extra.join('\n')}`;
         return { blocks: [output] };
     }
 }

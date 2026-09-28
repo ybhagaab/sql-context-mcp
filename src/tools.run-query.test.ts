@@ -62,8 +62,11 @@ describe('run_query: table format keeps the legacy look', () => {
     expect(lines[0]).toBe('id   | name   ');
     expect(lines.slice(2, 102).map((l) => l.split(' | ')[0].trim())).toEqual(Array.from({ length: 100 }, (_, i) => String(i)));
     expect(lines[102]).toBe('... (100 more rows)');
-    expect(lines[104]).toMatch(/^200 rows returned\. \(\d+ms\)$/);
-    expect(lines[105]).toMatch(/^More rows: fetch_rows \{"resultId":"r_[a-z2-7]{16}"\}; full result: export_query$/);
+    expect(lines[103]).toBe('');
+    expect(lines[104]).toMatch(/^More rows: fetch_rows \{"resultId":"r_[a-z2-7]{16}"\}; full result: export_query$/);
+    // The footer is the last line, as in 1.4.0.
+    expect(lines[105]).toMatch(/^200 rows returned\. \(\d+ms\)$/);
+    expect(lines).toHaveLength(106);
     const id = resultIdOf(out);
 
     const next = textOf(await call(rt, 'fetch_rows', { resultId: id }));
@@ -73,6 +76,30 @@ describe('run_query: table format keeps the legacy look', () => {
     expect(next).not.toContain('More rows');
     await until(() => pool.checkedOutCount === 0, 2_000, 'spool release');
     expect(fakeDb.leakedTransactions()).toHaveLength(0);
+  });
+
+  test('a text parser written for 1.4.0 output still reads columns, rows and the total', async () => {
+    // Parses the way 1.4.0 consumers do: rows after the separator until a blank line or the
+    // "... (N more rows)" line, and the total from a footer anchored at the end of the text.
+    const parse = (text: string) => {
+      const lines = text.split('\n');
+      const sep = lines.findIndex((l) => /^-+(?:-\+-+)*$/.test(l.trim()));
+      const columns = lines[sep - 1].split(' | ').map((v) => v.trim());
+      const rows: string[][] = [];
+      for (const line of lines.slice(sep + 1)) {
+        if (!line.trim() || /^\.\.\. \(\d+ more rows\)$/.test(line.trim()) || /^\d+ rows returned\./.test(line.trim())) break;
+        rows.push(line.split(' | ').map((v) => v.trim()));
+      }
+      const count = /(?:^|\n)(\d+) rows returned\. \((\d+)ms\)\s*$/.exec(text);
+      return { columns, rows, total: count ? Number(count[1]) : null };
+    };
+    define('select id, name from big', ID_NAME, numbered(250), 250);
+    define('select id, name from t', ID_NAME, [['1', 'a'], ['2', 'b']]);
+    const paged = parse(textOf(await call(rt, 'run_query', { sql: 'select id, name from big' })));
+    expect(paged).toMatchObject({ columns: ['id', 'name'], total: 250 });
+    expect(paged.rows).toHaveLength(100);
+    const script = parse(textOf(await call(rt, 'run_query', { sql: "set search_path to 'x'; select id, name from t" })));
+    expect(script).toEqual({ columns: ['id', 'name'], rows: [['1', 'a'], ['2', 'b']], total: 2 });
   });
 
   test('column widths come from the page rows, and wide later rows do not widen page 1', async () => {
@@ -203,7 +230,7 @@ describe('run_query: scripts', () => {
   test('earlier statements run first on the same connection, and are listed', async () => {
     define('select id, name from t', ID_NAME, [['1', 'a']]);
     const out = textOf(await call(rt, 'run_query', { sql: "set search_path to 'x'; select id, name from t" }));
-    expect(out).toMatch(/1 rows returned\. \(\d+ms\)\nEarlier statements: SET$/);
+    expect(out).toMatch(/\n\nEarlier statements: SET\n1 rows returned\. \(\d+ms\)$/);
     expect(fakeDb.leakedSessionState()).toHaveLength(0);
     expect(pool.idleCount).toBe(0);
     const json = jsonOf(await call(rt, 'run_query', { sql: "set search_path to 'x'; select id, name from t", format: 'json' }));
@@ -215,7 +242,7 @@ describe('run_query: scripts', () => {
     define('select b from two', [{ name: 'b', oid: 23 }], [['3']]);
     const out = textOf(await call(rt, 'run_query', { sql: 'select a from one; select b from two;' }));
     expect(out.split('\n')[0].trim()).toBe('b');
-    expect(out).toMatch(/Earlier statements: SELECT \(2 rows\)$/);
+    expect(out).toMatch(/Earlier statements: SELECT \(2 rows\)\n1 rows returned\. \(\d+ms\)$/);
   });
 
   test('a script that ends with a statement without rows reports its status', async () => {

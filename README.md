@@ -89,8 +89,8 @@ event_date | campaign_id | installs
 ...
 ... (1694 more rows)
 
-1794 rows returned. (2300ms)
 More rows: fetch_rows {"resultId":"r_7k2mq4x9d3p8w1ab"}; full result: export_query
+1794 rows returned. (2300ms)
 ```
 
 For analysis in chat, aggregate in SQL (`GROUP BY`, `COUNT`, `SUM`) rather than paging through raw
@@ -164,8 +164,8 @@ want to keep.
 ### Scripts and session settings
 
 - `sql` may contain several statements separated by semicolons. They run in order on one
-  connection. The result of the last statement is shown, followed by a summary of the others
-  (`Earlier statements: SET`).
+  connection. The result of the last statement is shown, with a summary of the others
+  (`Earlier statements: SET`) just above the row-count line.
 - Scripts with `BEGIN`/`COMMIT` run exactly as written.
 - Session settings don't carry over to the next call, so put `SET` and the query in the same call.
   A connection that ran a script, changed a setting, or was left in a transaction is closed

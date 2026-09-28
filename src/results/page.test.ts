@@ -224,8 +224,9 @@ describe('status lines and envelopes', () => {
 
   test('run/table: partial result keeps legacy lines and adds the paging line', () => {
     const text = filled('table', 3).render({ mode: 'run', offset: 0, totalRows: 1794, hasMore: true, resultId: 'r_abcdefghijklmnop', executionTimeMs: 2300 }).blocks[0];
-    expect(text).toContain('\n... (1791 more rows)\n\n1794 rows returned. (2300ms)\n');
-    expect(text.endsWith('More rows: fetch_rows {"resultId":"r_abcdefghijklmnop"}; full result: export_query')).toBe(true);
+    // The row-count footer stays the last line (1.4.0 parsers read it from the end).
+    expect(text).toContain('\n... (1791 more rows)\n\nMore rows: fetch_rows {"resultId":"r_abcdefghijklmnop"}; full result: export_query\n');
+    expect(text.endsWith('\n1794 rows returned. (2300ms)')).toBe(true);
   });
 
   test('run/table: busy paging, unknown totals and earlier statements', () => {
@@ -235,7 +236,7 @@ describe('status lines and envelopes', () => {
     expect(unknown).toContain('... (more rows)');
     expect(unknown).toContain('More than 2 rows returned. (1ms)');
     const script = filled('table', 1).render({ mode: 'run', offset: 0, totalRows: 1, hasMore: false, resultId: null, executionTimeMs: 1, statements: ['SET', 'INSERT (5 rows)'] }).blocks[0];
-    expect(script.endsWith('1 rows returned. (1ms)\nEarlier statements: SET, INSERT (5 rows)')).toBe(true);
+    expect(script.endsWith('\n\nEarlier statements: SET, INSERT (5 rows)\n1 rows returned. (1ms)')).toBe(true);
   });
 
   test('run/table: statements without rows keep the legacy message', () => {
