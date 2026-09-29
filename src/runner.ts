@@ -12,14 +12,17 @@
  *   row is counted so the total is exact.
  *
  * Retries (bounded, connection-level errors only) happen only before the first row, and never
- * after an earlier script statement has completed or a multi-statement script was sent.
+ * after an earlier script statement has completed, a multi-statement script was sent, or SQL that
+ * may change data was sent (a lost connection can't tell whether it ran). The final error records
+ * what had been sent and completed, for the error description.
  */
 import type { ServerConfig } from './config';
-import { planScript, ScriptPlan, EmptySqlError } from './sql/classify';
+import { planScript, ScriptPlan, EmptySqlError, StatementInfo, mayChangeData } from './sql/classify';
 import { withConnectionRetry, isConnectionLevelError } from './db/pool';
 import { Lease, GuardOptions, QueryCancelledError, QueryTimeoutError } from './db/lease';
 import { detectEngine, fetchBatchSize, cursorTotals, resolveColumnTypes, typeLookupOn, EngineInfo } from './db/engine';
-import { CursorReader, DeclareRejectedError } from './db/cursor';
+import { CursorReader, DeclareRejectedError, declarePrefix } from './db/cursor';
+import { annotate, setContext, StatementRef } from './errors/context';
 import { streamQuery, RowPump, StreamField, StreamStatementResult } from './db/stream';
 import { PageBuilder, Format, RenderedPage, PagingUnavailable, PageMeta } from './results/page';
 import { columnsFromFields, ColumnInfo } from './results/values';
@@ -41,11 +44,60 @@ export interface RunRequest {
   timeoutMs: number;
   signal?: AbortSignal;
   progress?: ProgressReporter | null;
+  /** The tool, for error wording (default run_query). */
+  operation?: string;
 }
 
-interface RunState {
-  /** Set once a retry would be unsafe: a row arrived, or a script statement ran. */
+/** Per-call execution state, shared by every attempt; error descriptions report it. */
+export interface SqlProgress {
+  /** Set once a retry would be unsafe: a row arrived, a script statement ran, or data-changing SQL was sent. */
   noRetry: boolean;
+  /** Attempts on which the caller's SQL was sent. */
+  sentCount: number;
+  sentThisAttempt: boolean;
+  /** Summaries of the script statements that completed. */
+  completed: string[];
+  /** The statement being run. */
+  current: StatementRef | null;
+}
+
+type RunState = SqlProgress;
+
+export function newSqlProgress(): SqlProgress {
+  return { noRetry: false, sentCount: 0, sentThisAttempt: false, completed: [], current: null };
+}
+
+/** Records that `statement` is about to be sent. Data-changing SQL is never re-sent after a lost connection. */
+export function markSending(state: SqlProgress, ref: StatementRef): void {
+  state.current = ref;
+  if (!state.sentThisAttempt) {
+    state.sentThisAttempt = true;
+    state.sentCount++;
+  }
+  if (mayChangeData(ref.text)) state.noRetry = true;
+}
+
+export function statementRef(statement: StatementInfo, index: number | null, shift = 0): StatementRef {
+  return { text: statement.text, offset: statement.offset, shift, index };
+}
+
+/** The whole text, sent as one request. */
+export function wholeRef(sql: string): StatementRef {
+  return { text: sql, offset: 0, shift: 0, index: null };
+}
+
+/** Adds what the call had done to its final error, for the error description. */
+export function annotateSqlError(err: unknown, sql: string, plan: ScriptPlan, state: SqlProgress, operation: string): unknown {
+  annotate(err, { phase: 'query' });
+  return setContext(err, {
+    operation,
+    sql,
+    sentCount: state.sentCount,
+    completed: [...state.completed],
+    statement: state.current ?? undefined,
+    isScript: plan.isScript,
+    statementCount: plan.statements.length,
+  });
 }
 
 /** Rows written to a spool file per append on the streaming path. */
@@ -81,48 +133,57 @@ export async function runQuery(req: RunRequest, ctx: RunContext): Promise<Render
   const plan = planScript(req.sql);
   if (plan.complete && plan.statements.length === 0) throw new EmptySqlError();
   const started = Date.now();
-  const state: RunState = { noRetry: false };
-  return withConnectionRetry(
-    async (pool) => {
-      req.progress?.phase('waiting for a database connection');
-      const lease = await Lease.acquire(pool, { signal: req.signal });
-      const hand = { off: false };
-      try {
-        if (plan.changesSession) lease.markDiscard();
-        const engine = await detectEngine(pool, lease);
-        req.progress?.phase('query running on the database');
-        if (!plan.complete || plan.hasTransactionControl) {
-          // Run the text as written, in one request, then discard the connection if it changed state.
-          if (plan.isScript) state.noRetry = true;
-          return await streamPath(lease, req.sql, [], req, ctx, state, started);
-        }
-        const statements = await runPrefix(lease, plan, req, state);
-        const last = plan.last as NonNullable<ScriptPlan['last']>;
-        if (last.kind === 'rows') {
-          try {
-            return await cursorPath(lease, engine, last.text, statements, req, ctx, state, started, hand);
-          } catch (err) {
-            if (!(err instanceof DeclareRejectedError)) throw err;
-            // DECLARE doesn't execute the query, so running it without a cursor is safe.
+  const state: RunState = newSqlProgress();
+  try {
+    return await withConnectionRetry(
+      async (pool) => {
+        state.sentThisAttempt = false;
+        state.completed = [];
+        state.current = null;
+        req.progress?.phase('waiting for a database connection');
+        const lease = await Lease.acquire(pool, { signal: req.signal });
+        const hand = { off: false };
+        try {
+          if (plan.changesSession) lease.markDiscard();
+          const engine = await detectEngine(pool, lease);
+          req.progress?.phase('query running on the database');
+          if (!plan.complete || plan.hasTransactionControl) {
+            // Run the text as written, in one request, then discard the connection if it changed state.
+            if (plan.isScript) state.noRetry = true;
+            return await streamPath(lease, req.sql, wholeRef(req.sql), [], req, ctx, state, started);
           }
+          const statements = await runPrefix(lease, plan, req, state);
+          const last = plan.last as NonNullable<ScriptPlan['last']>;
+          const lastIndex = plan.statements.length;
+          if (last.kind === 'rows') {
+            try {
+              return await cursorPath(lease, engine, last, lastIndex, statements, req, ctx, state, started, hand);
+            } catch (err) {
+              if (!(err instanceof DeclareRejectedError)) throw err;
+              // DECLARE doesn't execute the query, so running it without a cursor is safe.
+            }
+          }
+          return await streamPath(lease, last.text, statementRef(last, lastIndex), statements, req, ctx, state, started);
+        } catch (err) {
+          if (isConnectionLevelError(err)) lease.markDiscard();
+          throw err;
+        } finally {
+          if (!hand.off) lease.release();
         }
-        return await streamPath(lease, last.text, statements, req, ctx, state, started);
-      } catch (err) {
-        if (isConnectionLevelError(err)) lease.markDiscard();
-        throw err;
-      } finally {
-        if (!hand.off) lease.release();
-      }
-    },
-    { canRetry: () => !state.noRetry },
-  );
+      },
+      { canRetry: () => !state.noRetry },
+    );
+  } catch (err) {
+    throw annotateSqlError(err, req.sql, plan, state, req.operation ?? 'run_query');
+  }
 }
 
 async function runPrefix(lease: Lease, plan: ScriptPlan, req: RunRequest, state: RunState): Promise<string[]> {
   const summaries: string[] = [];
   const guard = guardOf(req);
-  for (const statement of plan.prefix) {
+  for (const [i, statement] of plan.prefix.entries()) {
     const counts = new Map<number, number>();
+    markSending(state, statementRef(statement, i + 1));
     const outcome = await streamQuery(
       lease,
       statement.text,
@@ -131,6 +192,7 @@ async function runPrefix(lease: Lease, plan: ScriptPlan, req: RunRequest, state:
     );
     state.noRetry = true;
     for (const r of outcome.results) summaries.push(summarizeStatement(r, r.streamedIndex === null ? 0 : counts.get(r.streamedIndex) ?? 0));
+    state.completed = [...summaries];
   }
   return summaries;
 }
@@ -138,7 +200,8 @@ async function runPrefix(lease: Lease, plan: ScriptPlan, req: RunRequest, state:
 async function cursorPath(
   lease: Lease,
   engine: EngineInfo,
-  text: string,
+  statement: StatementInfo,
+  index: number,
   statements: string[],
   req: RunRequest,
   ctx: RunContext,
@@ -147,7 +210,8 @@ async function cursorPath(
   hand: { off: boolean },
 ): Promise<RenderedPage> {
   const guard = guardOf(req);
-  const reader = await CursorReader.open(lease, text, engine, guard);
+  markSending(state, statementRef(statement, index, declarePrefix(engine).length));
+  const reader = await CursorReader.open(lease, statement.text, engine, guard);
   try {
     const batch = fetchBatchSize(ctx.config.fetchBatchRows, engine);
     // The first FETCH waits for the query to finish.
@@ -273,12 +337,14 @@ interface ResultSetState {
 async function streamPath(
   lease: Lease,
   text: string,
+  ref: StatementRef,
   statements: string[],
   req: RunRequest,
   ctx: RunContext,
   state: RunState,
   started: number,
 ): Promise<RenderedPage> {
+  markSending(state, ref);
   const maxChars = effectiveMaxChars(req.maxChars, ctx.config);
   const ceiling = ctx.config.maxInlineCharsCeiling;
   const threshold = ctx.config.spoolThresholdBytes;

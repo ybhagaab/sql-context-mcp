@@ -55,6 +55,8 @@ const store_1 = require("../files/store");
 const page_1 = require("./page");
 const lease_1 = require("../db/lease");
 const progress_1 = require("../mcp/progress");
+const describe_1 = require("../errors/describe");
+const context_1 = require("../errors/context");
 class ResultUnavailableError extends Error {
     constructor(resultId, reason) {
         super(`result ${resultId} is no longer available (${reason}). Re-run the query, or use export_query.`);
@@ -91,9 +93,8 @@ class SpoolLimitError extends Error {
     }
 }
 exports.SpoolLimitError = SpoolLimitError;
-function describe(err) {
-    return err instanceof Error ? err.message : String(err);
-}
+/** A one-line description of an error, never blank. */
+const describe = describe_1.errorText;
 function sleep(ms) {
     return new Promise((resolve) => {
         const t = setTimeout(resolve, ms);
@@ -708,8 +709,10 @@ class ResultStore {
                 });
             }
             catch (err) {
-                if (!(err instanceof page_1.RowTooLargeError) && !(err instanceof OffsetOutOfRangeError))
+                if (!(err instanceof page_1.RowTooLargeError) && !(err instanceof OffsetOutOfRangeError)) {
                     await s.close('failed', describe(err));
+                    (0, context_1.annotate)(err, { phase: 'query', operation: 'fetch_rows', resultClosed: true });
+                }
                 throw err;
             }
             finally {

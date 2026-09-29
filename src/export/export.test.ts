@@ -257,7 +257,9 @@ describe('Property 10 (exports): no data file after a failure, cancel or low-dis
     fakeDb.failWhen('__row_5__', connectionError(), 1);
     const failed = await call(rt, 'export_query', { sql: 'select id, name from t' });
     expect(failed.isError).toBe(true);
-    expect(textOf(failed)).toBe('Error: Connection terminated unexpectedly');
+    const text = textOf(failed);
+    expect(text.split('\n')[0]).toBe('Error: Lost the connection to the database while exporting (Connection terminated unexpectedly).');
+    expect(text.split('\n').pop()).toBe('Error type: connection_lost.');
     expect(fakeDb.statementsMatching(/^select id, name from t$/)).toHaveLength(1);
     expect(leftovers(rt)).toEqual([]);
   });

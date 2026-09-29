@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.5.1
+
+### Changed: errors say what failed and how to fix it
+
+- **Every tool error** reads `Error: <what failed>`, then `Likely cause:`, `To fix:`, supporting
+  lines, and a last line `Error type: <type>. <what happened to the SQL>`. The first line still
+  starts with `Error: `, and database errors keep the database's message there. The server's own
+  errors (invalid arguments, cancellation, timeouts, paging and export limits) are unchanged.
+- **Network and VPN failures are explained instead of guessed.** A connect error names the host
+  and port, and a DNS lookup shows whether the host resolves to a private address, which needs a
+  VPN, a peered network or a tunnel. When the driver reports only a timeout, a short TCP check
+  tells a network timeout (VPN down, firewall) from a server that accepted the connection but
+  didn't finish the login. A refused connection on localhost points at the SSH tunnel. Before, an
+  unreachable database returned a blank `Error: ` after about 75 seconds.
+- **Login, TLS and settings errors** name the setting to change: `SQL_USER` and `SQL_PASSWORD` (or
+  the IAM database user, or the secret), `SQL_SSL_MODE` when the server requires or lacks SSL,
+  `SQL_SSL_CA` for certificate errors, `SQL_DATABASE` when the database doesn't exist, and the
+  missing variable for configuration errors.
+- **AWS credential errors** (IAM and Secrets Manager) say whether no credentials were found, they
+  expired, access was denied (with the API action), the cluster or secret wasn't found in the
+  region, or the AWS API couldn't be reached.
+- **SQL errors** add the SQLSTATE code and name, the database's detail, hint and context, and the
+  error position as a line and column of your SQL, with that line and a caret. In a script, the
+  error says which statement failed and which ones had completed. Permission errors say that
+  rewriting the SQL won't help, and Redshift WLM and statement-timeout cancellations are named.
+- **Lost connections** say whether the database is reachable again, and whether a statement that
+  changes data may have run.
+- **`connection_status`** checks the settings, DNS, the network and the login in turn, and reports
+  the first step that fails with its cause and fix. When connected, the first lines are unchanged
+  (`Connected`, `Database:`, `User:`, `Host:`), followed by the server version, the round-trip time
+  and pool use.
+- **`export_status`** reports the same description in `error` and adds `errorType`.
+
+### Added
+
+- `SQL_CONNECT_TIMEOUT_MS` (default 10 seconds): the time limit for opening one connection,
+  including TLS and the login. `0` waits for the operating system, as before.
+
+### Changed
+
+- A connect that timed out is tried twice (it was three times, each up to the operating system's
+  limit), and refused, unroutable and unresolvable connects aren't retried. An unreachable database
+  now fails in about 20 seconds.
+- SQL that may change data (INSERT, UPDATE, DELETE, COPY, CREATE and similar) is no longer sent
+  again after the connection is lost while it runs, because it may already have taken effect.
+  Read-only queries are still retried.
+- `EHOSTUNREACH`, `ENETUNREACH`, `ENETDOWN` and `EADDRNOTAVAIL` count as connection-level errors:
+  the pool is replaced, and a stray one no longer stops the server.
+- The `export_query` description says that export files are deleted when the server restarts.
+
 ## 1.5.0
 
 ### Added: results of any size

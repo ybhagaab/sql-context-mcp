@@ -250,6 +250,33 @@ describe.skipIf(!LIVE_ENABLED || !TABLE)('live: Redshift', () => {
     expect(rt.results.openCursorCount).toBe(0);
   }, 120_000);
 
+  test('connection_status: the first four lines are unchanged, then server, round trip and pool', async () => {
+    const rt = runtime();
+    const lines = text(await call(rt, 'connection_status', {})).split('\n');
+    log(`connection_status: ${lines.slice(4).join(' | ')}`);
+    expect(lines[0]).toBe('Connected');
+    expect(lines[1]).toMatch(/^Database: \S+/);
+    expect(lines[2]).toMatch(/^User: \S+/);
+    expect(lines[3]).toMatch(/^Host: \S+/);
+    expect(lines[4]).toMatch(/^Server: PostgreSQL 8\.0\.2 .*Redshift/);
+    expect(lines[5]).toMatch(/^Round trip: \d+ ms$/);
+    expect(lines[6]).toMatch(/^Pool: \d+ in use, \d+ idle, \d+ waiting \(max \d+\)$/);
+  }, 60_000);
+
+  test('SQL errors: Redshift positions map to the line and column of the caller\'s SQL', async () => {
+    const rt = runtime();
+    const missing = text(await call(rt, 'run_query', { sql: 'select 1;\nselect *\nfrom no_such_schema_xyz.no_such_table' }));
+    log(`missing table:\n${missing}`);
+    expect(missing.split('\n')[0]).toMatch(/^Error: (schema|relation) .*does not exist/);
+    expect(missing).toMatch(/Error type: sql_error \(SQLSTATE (3F000|42P01) \w+\)\. Statement 2 of 2 failed and made no changes\. The statements before it had completed: SELECT \(1 rows\)\.$/);
+    // A trailing comma before FROM: the error points at "from" on line 2.
+    const syntax = text(await call(rt, 'run_query', { sql: 'select 1 as a,\n  from t' }));
+    log(`syntax error:\n${syntax}`);
+    expect(syntax.split('\n')[0]).toBe('Error: syntax error at or near "from"');
+    expect(syntax).toContain('At line 2, column 3:\n    from t\n    ^');
+    expect(syntax).toMatch(/Error type: sql_error \(SQLSTATE 42601 syntax_error\)\.$/);
+  }, 60_000);
+
   test.skipIf(!BIG_TABLE)('a large export streams without a cursor and keeps a bounded heap', async () => {
     const rt = runtime();
     const sql = `select * from ${BIG_TABLE} limit ${EXPORT_ROWS}`;

@@ -6,8 +6,10 @@
  * pool checkout, creation-race guard, compare-and-swap pool discard with background drain, IAM
  * credential-expiry recycling, keepalive, and connection-level error classification.
  */
-import { Pool } from 'pg';
+import { Pool, Client } from 'pg';
 import { ZodError } from 'zod';
+import { getConfig } from '../config';
+import { annotate, setContext, contextOf, ConnectTarget } from '../errors/context';
 
 // Connection pooling state. Queries check a client out of `pool` per call, so concurrent MCP tool
 // calls execute on separate connections in parallel (up to the pool's `max`) instead of
@@ -58,12 +60,30 @@ export function __getTestConnectionState(): {
 
 type AuthMethod = 'direct' | 'iam' | 'secrets_manager';
 
+function authMethodOf(): AuthMethod {
+  return (process.env.SQL_AUTH_METHOD || 'direct').toLowerCase() as AuthMethod;
+}
+
+/** A settings problem: no connection was attempted. */
+function configError(message: string): Error {
+  return annotate(new Error(message), { phase: 'config', authMethod: authMethodOf() });
+}
+
+/** An AWS credential call failed. Keeps the SDK error as `cause`, so its name and code stay visible. */
+function credentialsError(
+  message: string,
+  cause: unknown,
+  aws: { service: 'redshift' | 'secretsmanager'; region: string; resource?: string },
+): Error {
+  return annotate(Object.assign(new Error(message), { cause }), { phase: 'credentials', authMethod: authMethodOf(), aws });
+}
+
 async function getSecretsManagerCredentials(): Promise<{
   host?: string; port?: number; database?: string; user: string; password: string;
 }> {
   const { SecretsManagerClient, GetSecretValueCommand } = await import('@aws-sdk/client-secrets-manager');
   const secretId = process.env.SQL_SECRET_ID;
-  if (!secretId) throw new Error('SQL_SECRET_ID is required when using secrets_manager authentication');
+  if (!secretId) throw configError('SQL_SECRET_ID is required when using secrets_manager authentication');
 
   const region = process.env.SQL_AWS_REGION || process.env.AWS_REGION || 'us-east-1';
   const clientConfig: any = { region };
@@ -83,7 +103,9 @@ async function getSecretsManagerCredentials(): Promise<{
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    throw new Error(`Failed to retrieve secret from Secrets Manager: ${message}`);
+    throw credentialsError(`Failed to retrieve secret from Secrets Manager: ${message}`, error, {
+      service: 'secretsmanager', region, resource: secretId,
+    });
   }
 }
 
@@ -97,9 +119,9 @@ async function getIAMCredentials(): Promise<{ user: string; password: string }> 
   const dbUser = process.env.SQL_USER;
   const database = process.env.SQL_DATABASE;
 
-  if (!clusterId) throw new Error('SQL_CLUSTER_ID is required when using IAM authentication');
-  if (!dbUser) throw new Error('SQL_USER is required when using IAM authentication (Redshift database user)');
-  if (!database) throw new Error('SQL_DATABASE is required when using IAM authentication');
+  if (!clusterId) throw configError('SQL_CLUSTER_ID is required when using IAM authentication');
+  if (!dbUser) throw configError('SQL_USER is required when using IAM authentication (Redshift database user)');
+  if (!database) throw configError('SQL_DATABASE is required when using IAM authentication');
 
   const region = process.env.SQL_AWS_REGION || process.env.AWS_REGION || 'us-east-1';
   const clientConfig: any = { region };
@@ -119,7 +141,7 @@ async function getIAMCredentials(): Promise<{ user: string; password: string }> 
     return { user: response.DbUser, password: response.DbPassword };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    throw new Error(`Failed to get IAM credentials: ${message}`);
+    throw credentialsError(`Failed to get IAM credentials: ${message}`, error, { service: 'redshift', region, resource: clusterId });
   }
 }
 
@@ -172,8 +194,16 @@ export function getPoolMax(): number {
   return 10;
 }
 
+/**
+ * Resolves the connection settings, including IAM or Secrets Manager credentials. Errors are
+ * tagged with the phase that failed (`config` or `credentials`).
+ */
+export function resolveConnectionConfig(): Promise<ConnectionConfig> {
+  return getConnectionConfig();
+}
+
 async function getConnectionConfig(): Promise<ConnectionConfig> {
-  const authMethod = (process.env.SQL_AUTH_METHOD || 'direct').toLowerCase() as AuthMethod;
+  const authMethod = authMethodOf();
   let host = process.env.SQL_HOST;
   let port = parseInt(process.env.SQL_PORT || '5439', 10);
   let database = process.env.SQL_DATABASE;
@@ -195,17 +225,80 @@ async function getConnectionConfig(): Promise<ConnectionConfig> {
     case 'direct': default: break;
   }
 
-  if (!host) throw new Error('Missing SQL_HOST. Set it directly or include in Secrets Manager secret.');
-  if (!database) throw new Error('Missing SQL_DATABASE. Set it directly or include in Secrets Manager secret.');
-  if (!user || !password) throw new Error(`Missing credentials. For auth method '${authMethod}', ensure required variables are set.`);
+  if (!host) throw configError('Missing SQL_HOST. Set it directly or include in Secrets Manager secret.');
+  if (!database) throw configError('Missing SQL_DATABASE. Set it directly or include in Secrets Manager secret.');
+  if (!user || !password) throw configError(`Missing credentials. For auth method '${authMethod}', ensure required variables are set.`);
+  let ssl: boolean | object;
+  try {
+    ssl = buildSSLConfig();
+  } catch (error) {
+    throw annotate(error, { phase: 'config', authMethod });
+  }
   return {
-    host, port, database, user, password, ssl: buildSSLConfig(),
+    host, port, database, user, password, ssl,
     keepAlive: true, keepAliveInitialDelayMillis: 10000,
     max: getPoolMax(),
   };
 }
 
-const CONNECTION_LEVEL_ERROR_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT']);
+/** The connect timeout in force (SQL_CONNECT_TIMEOUT_MS; 0 means none). */
+export function connectTimeoutMs(): number {
+  return getConfig().connectTimeoutMs;
+}
+
+type ConnectCallback = (err?: Error) => void;
+interface ConnectableClient {
+  connect: (callback?: ConnectCallback) => unknown;
+  host?: unknown;
+  port?: unknown;
+}
+
+/**
+ * The client class the pool uses for new connections: pg's Client with the connect timeout
+ * applied to that one connection, and connect errors tagged with the connect phase and target
+ * (so no SQL is reported as sent). The timeout is per connection on purpose: pg-pool's own
+ * `connectionTimeoutMillis` would also limit how long a query may wait for a free connection.
+ *
+ * Returns undefined when the driver has no Client export (test mocks); the pool then uses its
+ * default.
+ */
+function connectingClientClass(timeoutMs: number): unknown {
+  let Base: unknown;
+  try {
+    Base = Client;
+  } catch {
+    return undefined;
+  }
+  if (typeof Base !== 'function') return undefined;
+  const Ctor = Base as new (config?: Record<string, unknown>) => ConnectableClient;
+  return function ConnectingClient(config?: Record<string, unknown>): ConnectableClient {
+    const client = new Ctor(timeoutMs > 0 ? { ...(config ?? {}), connectionTimeoutMillis: timeoutMs } : config);
+    const connect = client.connect.bind(client);
+    const target = (): ConnectTarget => ({
+      host: String(client.host ?? config?.host ?? ''),
+      port: Number(client.port ?? config?.port) || null,
+    });
+    const tag = (err: unknown): unknown => annotate(err, { phase: 'connect', target: target(), connectTimeoutMs: timeoutMs, authMethod: authMethodOf() });
+    client.connect = (callback?: ConnectCallback): unknown => {
+      if (typeof callback === 'function') {
+        return connect((err?: Error) => {
+          if (err) tag(err);
+          callback(err);
+        });
+      }
+      return Promise.resolve(connect()).catch((err: unknown) => {
+        throw tag(err);
+      });
+    };
+    return client;
+  };
+}
+
+const CONNECTION_LEVEL_ERROR_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT',
+  // The network path to the server went away (for example a VPN disconnect).
+  'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL',
+]);
 const CONNECTION_LEVEL_ERROR_MESSAGE_PHRASES = [
   'Connection terminated',
   'terminated unexpectedly',
@@ -224,8 +317,9 @@ const CONNECTION_LEVEL_ERROR_MESSAGE_PHRASES = [
  */
 export function isConnectionLevelError(error: unknown): boolean {
   if (error instanceof ZodError) return false;
+  let code: unknown;
   if (error && typeof error === 'object') {
-    const code = (error as { code?: unknown }).code;
+    code = (error as { code?: unknown }).code;
     if (typeof code === 'string' && CONNECTION_LEVEL_ERROR_CODES.has(code)) return true;
   }
   const message =
@@ -235,9 +329,46 @@ export function isConnectionLevelError(error: unknown): boolean {
         ? (error as { message: string }).message
         : undefined;
   if (typeof message === 'string') {
+    // pg's connect timeout (SQL_CONNECT_TIMEOUT_MS). A database error never has this text and no code.
+    if (message === 'timeout expired' && code === undefined) return true;
     return CONNECTION_LEVEL_ERROR_MESSAGE_PHRASES.some((phrase) => message.includes(phrase));
   }
   return false;
+}
+
+/** Connect errors that an immediate retry won't fix: nothing listens, there is no route, or the name doesn't resolve. */
+const NO_RETRY_CONNECT_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL', 'ENOTFOUND', 'EAI_AGAIN']);
+/** Connection attempts allowed when each one ends in a connect timeout. */
+export const CONNECT_TIMEOUT_ATTEMPTS = 2;
+
+function networkCodeOf(error: unknown): string | undefined {
+  const e = error as { code?: unknown; errors?: unknown } | null;
+  if (typeof e?.code === 'string') return e.code;
+  if (Array.isArray(e?.errors)) {
+    for (const inner of e.errors) {
+      const code = (inner as { code?: unknown } | null)?.code;
+      if (typeof code === 'string') return code;
+    }
+  }
+  return undefined;
+}
+
+function isConnectTimeout(error: unknown): boolean {
+  const message = (error as { message?: unknown } | null)?.message;
+  return (
+    networkCodeOf(error) === 'ETIMEDOUT' ||
+    message === 'timeout expired' ||
+    (typeof message === 'string' && message.includes('timeout exceeded when trying to connect'))
+  );
+}
+
+/** How many attempts a connection-level error allows: fewer for connect failures that won't clear in a moment. */
+function attemptLimitFor(error: unknown): number {
+  if (contextOf(error).phase !== 'connect') return MAX_QUERY_ATTEMPTS;
+  const code = networkCodeOf(error);
+  if (code && NO_RETRY_CONNECT_CODES.has(code)) return 1;
+  if (isConnectTimeout(error)) return CONNECT_TIMEOUT_ATTEMPTS;
+  return MAX_QUERY_ATTEMPTS;
 }
 
 /**
@@ -277,7 +408,9 @@ export function getLastConnectionConfig(): ConnectionConfig | null {
 
 async function createPool(): Promise<Pool> {
   const config = await getConnectionConfig();
-  const newPool = new Pool(config);
+  const timeoutMs = connectTimeoutMs();
+  const ClientClass = connectingClientClass(timeoutMs);
+  const newPool = new Pool(ClientClass ? ({ ...config, Client: ClientClass } as never) : config);
   newPool.on('error', (err) => {
     // Background error on an idle pooled connection: log and discard this pool so the next tool
     // call rebuilds it. Never re-throw and never exit — pg emits this for e.g. an idle socket
@@ -288,7 +421,17 @@ async function createPool(): Promise<Pool> {
   // Eager connectivity validation: config/auth/network problems surface here (inside the
   // classified retry loop) rather than on the first real query. The validated connection is
   // returned to the pool as an idle client.
-  await newPool.query('SELECT 1');
+  try {
+    await newPool.query('SELECT 1');
+  } catch (error) {
+    // Only this server's validation query ran, so errors here belong to the connect phase.
+    throw annotate(error, {
+      phase: 'connect',
+      target: { host: config.host, port: config.port },
+      connectTimeoutMs: timeoutMs,
+      authMethod: authMethodOf(),
+    });
+  }
   lastConnectionConfig = config;
   pool = newPool;
   return newPool;
@@ -346,6 +489,9 @@ export async function withConnectionRetry<T>(
   operation: (activePool: Pool, attempt: number) => Promise<T>,
   options: { canRetry?: () => boolean } = {},
 ): Promise<T> {
+  const started = Date.now();
+  // The final error records how many attempts were made and how long they took.
+  const final = (error: unknown, attempt: number): unknown => setContext(error, { attempts: attempt, elapsedMs: Date.now() - started });
   for (let attempt = 1; attempt <= MAX_QUERY_ATTEMPTS; attempt++) {
     let activePool: Pool | null = null;
     try {
@@ -353,13 +499,18 @@ export async function withConnectionRetry<T>(
       return await operation(activePool, attempt);
     } catch (error) {
       if (!isConnectionLevelError(error)) {
-        throw error;
+        throw final(error, attempt);
       }
       if (activePool) {
         discardPool(activePool);
       }
       if (attempt >= MAX_QUERY_ATTEMPTS || (options.canRetry && !options.canRetry())) {
-        throw error;
+        throw final(error, attempt);
+      }
+      // Refused, unroutable and unresolvable connects fail the same way right away; a connect
+      // that timed out gets one more try, which bounds the wait (SQL_CONNECT_TIMEOUT_MS each).
+      if (attempt >= attemptLimitFor(error)) {
+        throw final(error, attempt);
       }
       const backoffMillis = RETRY_BACKOFF_MILLIS[Math.min(attempt - 1, RETRY_BACKOFF_MILLIS.length - 1)];
       await delay(backoffMillis);

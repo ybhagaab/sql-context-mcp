@@ -27,15 +27,15 @@ export declare const RunQueryInputSchema: z.ZodObject<{
 }, "strip", z.ZodTypeAny, {
     sql: string;
     format: "table" | "csv" | "json";
+    timeoutMs?: number | undefined;
     maxRows?: number | undefined;
     maxChars?: number | undefined;
-    timeoutMs?: number | undefined;
 }, {
     sql: string;
+    timeoutMs?: number | undefined;
     format?: "table" | "csv" | "json" | undefined;
     maxRows?: number | undefined;
     maxChars?: number | undefined;
-    timeoutMs?: number | undefined;
 }>;
 export declare const FetchRowsInputSchema: z.ZodObject<{
     resultId: z.ZodString;
@@ -68,15 +68,15 @@ export declare const ExportQueryInputSchema: z.ZodObject<{
     sql: string;
     format: "csv" | "jsonl";
     wait: boolean;
-    maxRows?: number | undefined;
     timeoutMs?: number | undefined;
+    maxRows?: number | undefined;
     fileName?: string | undefined;
     maxBytes?: number | undefined;
 }, {
     sql: string;
+    timeoutMs?: number | undefined;
     format?: "csv" | "jsonl" | undefined;
     maxRows?: number | undefined;
-    timeoutMs?: number | undefined;
     fileName?: string | undefined;
     wait?: boolean | undefined;
     maxBytes?: number | undefined;
@@ -128,13 +128,13 @@ export declare const QueryResultSchema: z.ZodObject<{
     rowCount: z.ZodNumber;
     executionTime: z.ZodNumber;
 }, "strip", z.ZodTypeAny, {
-    columns: string[];
     rows: (string | number | boolean | Date | null)[][];
+    columns: string[];
     rowCount: number;
     executionTime: number;
 }, {
-    columns: string[];
     rows: (string | number | boolean | Date | null)[][];
+    columns: string[];
     rowCount: number;
     executionTime: number;
 }>;

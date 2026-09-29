@@ -65,6 +65,16 @@ describe('loadConfig', () => {
     expect(warnings.some((w) => w.includes('SQL_PROGRESS_INTERVAL_MS'))).toBe(true);
   });
 
+  test('SQL_CONNECT_TIMEOUT_MS: 10 s by default, 0 disables it, invalid values fall back', () => {
+    expect(loadConfig({}, quiet).connectTimeoutMs).toBe(10_000);
+    expect(loadConfig({ SQL_CONNECT_TIMEOUT_MS: '2500' }, quiet).connectTimeoutMs).toBe(2_500);
+    expect(loadConfig({ SQL_CONNECT_TIMEOUT_MS: '0' }, quiet).connectTimeoutMs).toBe(0);
+    const warnings: string[] = [];
+    expect(loadConfig({ SQL_CONNECT_TIMEOUT_MS: '-1' }, (m) => warnings.push(m)).connectTimeoutMs).toBe(10_000);
+    expect(loadConfig({ SQL_CONNECT_TIMEOUT_MS: '900000' }, (m) => warnings.push(m)).connectTimeoutMs).toBe(10_000);
+    expect(warnings.filter((w) => w.includes('SQL_CONNECT_TIMEOUT_MS'))).toHaveLength(2);
+  });
+
   test('an inline budget above the ceiling is clamped to the ceiling', () => {
     const warnings: string[] = [];
     const c = loadConfig({ SQL_MAX_INLINE_CHARS: '9000000' }, (m) => warnings.push(m));

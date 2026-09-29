@@ -11,7 +11,18 @@
  *   separate socket (no pool slot needed), falling back to pg_cancel_backend(pid).
  */
 import { Client, Pool, PoolClient } from 'pg';
-import { getLastConnectionConfig } from './pool';
+import { getLastConnectionConfig, connectTimeoutMs } from './pool';
+import { annotate } from '../errors/context';
+
+/** Errors while getting a pooled connection happen before any SQL is sent. */
+function connectPhase(err: unknown, pool: Pool): unknown {
+  if (err instanceof QueryCancelledError) return err;
+  const options = (pool as unknown as { options?: { host?: unknown; port?: unknown } }).options;
+  const config = getLastConnectionConfig();
+  const host = typeof options?.host === 'string' ? options.host : config?.host;
+  const port = Number(options?.port ?? config?.port) || null;
+  return annotate(err, { phase: 'connect', target: host ? { host, port } : undefined });
+}
 
 export class QueryCancelledError extends Error {
   constructor(public readonly cause?: unknown) {
@@ -110,7 +121,9 @@ export class Lease {
   static async acquire(pool: Pool, opts: { signal?: AbortSignal } = {}): Promise<Lease> {
     const { signal } = opts;
     if (signal?.aborted) throw new QueryCancelledError();
-    const pending = pool.connect();
+    const pending = pool.connect().catch((err: unknown) => {
+      throw connectPhase(err, pool);
+    });
     if (!signal) return new Lease(await pending);
     const client = await new Promise<PoolClient>((resolve, reject) => {
       let settled = false;
@@ -244,7 +257,9 @@ export class Lease {
   }
 
   private async sqlCancel(config: Record<string, unknown>): Promise<void> {
-    const side = new Client(config) as unknown as {
+    // A bounded connect: when the network is down, the fallback must not hang.
+    const timeout = connectTimeoutMs() || 10_000;
+    const side = new Client({ ...config, connectionTimeoutMillis: timeout }) as unknown as {
       connect: () => Promise<void>;
       query: (text: string, values: unknown[]) => Promise<unknown>;
       end: () => Promise<void>;

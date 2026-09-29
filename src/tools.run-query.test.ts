@@ -382,7 +382,12 @@ describe('run_query: retries (Property 12)', () => {
     fakeDb.failWhen(/^DECLARE/i, connectionError(), 1);
     const result = await call(rt, 'run_query', { sql: "set search_path to 'x'; select id, name from t" });
     expect(result.isError).toBe(true);
-    expect(textOf(result)).toBe('Error: Connection terminated unexpectedly');
+    const text = textOf(result);
+    expect(text.split('\n')[0]).toBe('Error: Lost the connection to the database while the SQL was running (Connection terminated unexpectedly).');
+    expect(text.split('\n').pop()).toBe(
+      'Error type: connection_lost. Statement 2 of 2 was running when the connection was lost. ' +
+      'The statements before it had completed: SET. It was not retried, because a retry would run them again.',
+    );
     expect(fakeDb.statementsMatching(/^set search_path/)).toHaveLength(1);
   });
 

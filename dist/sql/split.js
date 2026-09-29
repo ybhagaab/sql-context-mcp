@@ -56,13 +56,18 @@ function hasContent(stmt) {
 }
 function splitStatements(sql) {
     const statements = [];
+    const offsets = [];
     let start = 0;
     let i = 0;
     const n = sql.length;
+    const incomplete = () => ({ statements: [], offsets: [], complete: false });
     const push = (end) => {
-        const text = sql.slice(start, end).trim();
-        if (text && hasContent(text))
+        const raw = sql.slice(start, end);
+        const text = raw.trim();
+        if (text && hasContent(text)) {
             statements.push(text);
+            offsets.push(start + (raw.length - raw.trimStart().length));
+        }
     };
     while (i < n) {
         const ch = sql[i];
@@ -89,7 +94,7 @@ function splitStatements(sql) {
                     i++;
             }
             if (depth > 0)
-                return { statements: [], complete: false };
+                return incomplete();
             continue;
         }
         // Single-quoted string: '' and backslash escapes.
@@ -113,7 +118,7 @@ function splitStatements(sql) {
                 i++;
             }
             if (!closed)
-                return { statements: [], complete: false };
+                return incomplete();
             continue;
         }
         // Double-quoted identifier: "" escapes.
@@ -133,7 +138,7 @@ function splitStatements(sql) {
                 i++;
             }
             if (!closed)
-                return { statements: [], complete: false };
+                return incomplete();
             continue;
         }
         // Dollar-quoted body. `$1` placeholders and identifiers containing `$` are not quotes.
@@ -143,7 +148,7 @@ function splitStatements(sql) {
                 const tag = match[0];
                 const close = sql.indexOf(tag, i + tag.length);
                 if (close === -1)
-                    return { statements: [], complete: false };
+                    return incomplete();
                 i = close + tag.length;
                 continue;
             }
@@ -155,5 +160,5 @@ function splitStatements(sql) {
         i++;
     }
     push(n);
-    return { statements, complete: true };
+    return { statements, offsets, complete: true };
 }

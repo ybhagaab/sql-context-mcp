@@ -50,7 +50,10 @@ No installation needed — just add to your MCP client config:
 - Multi-statement scripts, run in order on one connection
 - Timeouts, cancellation, and progress notifications for long-running queries
 - Concurrent query execution: each query checks a connection out of a pool (up to `SQL_POOL_MAX`, default 10), so parallel tool calls run in parallel instead of queueing on one connection
-- Automatic reconnect-and-retry on connection-level failures (bounded, with backoff)
+- Errors that name the likely cause and the fix (VPN, network, DNS, TLS, login, AWS credentials, SQL), and a
+  step-by-step `connection_status`
+- Automatic reconnect-and-retry on connection-level failures (bounded, with backoff; SQL that may change data is
+  never sent twice)
 - Browse schemas, tables, and columns
 - Multiple authentication methods (Direct, IAM, Secrets Manager)
 - SSL/TLS support with multiple modes
@@ -69,7 +72,7 @@ No installation needed — just add to your MCP client config:
 | `list_tables` | List tables in a schema |
 | `describe_table` | Get column information for a table |
 | `get_sample_data` | Preview rows from a table (up to 1,000) |
-| `connection_status` | Check connection health |
+| `connection_status` | Check the connection step by step (settings, DNS, network, login) |
 | `get_schema_context` | Load custom schema knowledge |
 | `list_presets` | List available schema context presets |
 
@@ -185,6 +188,81 @@ want to keep.
 Use `export_query` with `format: "jsonl"` and read the file. For smaller results, `run_query` with
 `format: "json"` and a large `maxChars`, followed by `fetch_rows` until `hasMore` is false, also
 works.
+
+---
+
+## Errors and troubleshooting
+
+When a call fails, the error says what failed, the likely cause, how to fix it, and whether any SQL
+ran. With the VPN disconnected, for example:
+
+```
+Error: Could not reach the database server at my-cluster.example.com:5439: the connection attempt timed out.
+Likely cause: The host name resolves to a private address (10.20.30.40), which is only reachable through a VPN, a peered network or an SSH tunnel, and that path is not working.
+To fix: Connect to the VPN (or start the SSH tunnel), then retry.
+Checked: the host name resolves to 10.20.30.40 (private); a TCP connection to 10.20.30.40:5439 got no answer within 3 s; 2 connection attempts over 20 s, each stopped by the 10 s connect timeout (SQL_CONNECT_TIMEOUT_MS).
+Error type: network_timeout. No SQL was run.
+```
+
+Database errors keep the database's message on the first line. They add the SQLSTATE, the
+database's detail and hint, and the error position as a line and column of your SQL:
+
+```
+Error: relation "custmers" does not exist
+To fix: Check the table name and schema (list_schemas and list_tables show what exists), and write it as schema.table if it is not in the search path.
+At line 4, column 6:
+  join custmers b on b.id = a.cid
+       ^
+Error type: sql_error (SQLSTATE 42P01 undefined_table).
+```
+
+The last line gives the error type and what happened to the SQL: `No SQL was run.`, which
+statement of a script failed and which ones had completed, or, after a lost connection, whether a
+statement that changes data may have run. The server's own errors (invalid arguments,
+cancellation, timeouts, paging and export limits) stay one line. `export_status` reports the same
+text in `error` and the type in `errorType`.
+
+| Error type | Meaning | Usual fix |
+|------------|---------|-----------|
+| `config` | A setting is missing or invalid | Set it in the server's `env`, then reconnect the server |
+| `aws_credentials` | IAM or Secrets Manager credentials couldn't be obtained: none found, expired, access denied, cluster or secret not found, or AWS unreachable | Refresh the credentials, or check `SQL_AWS_PROFILE`, `SQL_CLUSTER_ID`, `SQL_SECRET_ID` and `SQL_AWS_REGION` |
+| `dns` | The host name doesn't resolve | Check `SQL_HOST`; private names need the VPN |
+| `network_timeout` | The server didn't answer. For a private address, the VPN or tunnel is down | Connect to the VPN, or check the firewall or security group |
+| `network_unreachable` | No network route to the server | Connect to the network or VPN |
+| `connection_refused` | Nothing listens on the port. On localhost, the SSH tunnel isn't running | Check `SQL_PORT`; start the tunnel or the database |
+| `connect_timeout` | The server accepted the connection but didn't finish the login in time | Retry; check the server; raise `SQL_CONNECT_TIMEOUT_MS` |
+| `tls` | The SSL settings don't match the server, or its certificate can't be verified | Change `SQL_SSL_MODE`, or set `SQL_SSL_CA` |
+| `auth` | The login was rejected | Fix `SQL_USER` and `SQL_PASSWORD`, the IAM database user, or the secret |
+| `database_not_found` | `SQL_DATABASE` doesn't exist | Fix `SQL_DATABASE` |
+| `too_many_connections` | The server's connection limit is reached | Close idle sessions, or lower `SQL_POOL_MAX` |
+| `server_unavailable` | The server is starting up or paused, or it closed the connection during the login | Wait and retry |
+| `connection_lost` | The connection dropped while SQL was running | Reconnect and run it again; for statements that change data, check first |
+| `sql_error` | The database rejected the SQL | Fix the SQL |
+| `permission_denied` | The database user lacks a privilege | Query objects the user can read, or ask for a grant |
+| `server_timeout` | The database cancelled the query (`statement_timeout`, or a Redshift WLM rule) | Make the query cheaper, or ask about the limit |
+
+`connection_status` checks each step and reports the first one that fails:
+
+```
+Not connected: Could not reach the database server at my-cluster.example.com:5439: the connection attempt timed out.
+Likely cause: The host name resolves to a private address (10.20.30.40), which is only reachable through a VPN, a peered network or an SSH tunnel, and that path is not working.
+To fix: Connect to the VPN (or start the SSH tunnel), then retry.
+Checks:
+  Settings: ok (password login, user analyst, database analytics at my-cluster.example.com:5439, SSL mode require)
+  DNS: ok (resolves to 10.20.30.40, private)
+  Network: failed (no answer from 10.20.30.40:5439 within 5 s)
+  Login: not checked
+Error type: network_timeout.
+```
+
+When connected, it shows the database, user and host as before, then the server version, the
+round-trip time and pool use.
+
+Each connection attempt is limited to `SQL_CONNECT_TIMEOUT_MS` (10 seconds), so an unreachable
+database fails in about 20 seconds instead of several minutes. A connect that timed out is tried
+twice; refused, unroutable and unresolvable connects aren't retried. A connection lost while SQL
+runs is retried (up to 3 attempts) only when that's safe: before any row arrived, before any
+statement of a script completed, and never after SQL that may change data was sent.
 
 ---
 
@@ -374,6 +452,7 @@ JSON (`my-schema.json`):
 | `SQL_AWS_REGION` | IAM/SM | `us-east-1` | AWS region |
 | `SQL_AWS_PROFILE` | No | - | AWS profile name |
 | `SQL_POOL_MAX` | No | `10` | Max pooled connections = max concurrent queries |
+| `SQL_CONNECT_TIMEOUT_MS` | No | `10000` (10 s) | Time limit for opening one connection (network, TLS and login); `0` waits for the operating system |
 | `SQL_DEFAULT_MAX_ROWS` | No | `100` | Default rows per page |
 | `SQL_MAX_INLINE_CHARS` | No | `100000` | Default page budget, in characters |
 | `SQL_MAX_INLINE_CHARS_CEILING` | No | `5000000` | Largest `maxChars` a call may request |

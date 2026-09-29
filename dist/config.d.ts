@@ -7,6 +7,8 @@
  */
 export interface ServerConfig {
     poolMax: number;
+    /** How long one connection attempt (network, TLS and login) may take; 0 waits for the OS. */
+    connectTimeoutMs: number;
     defaultMaxRows: number;
     maxInlineChars: number;
     maxInlineCharsCeiling: number;

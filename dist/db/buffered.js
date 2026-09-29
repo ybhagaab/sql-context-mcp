@@ -11,12 +11,20 @@ exports.executeQuery = executeQuery;
  */
 const pool_1 = require("./pool");
 const values_1 = require("../results/values");
+const context_1 = require("../errors/context");
 async function executeQuery(sql, params) {
     return (0, pool_1.withConnectionRetry)(async (activePool) => {
         const startTime = Date.now();
         // Per-query checkout: `pool.query()` acquires a client from the pool, runs the query, and
         // releases it, so concurrent calls run in parallel on separate connections.
-        const raw = (await activePool.query({ text: sql, values: params, rowMode: 'array', types: values_1.RAW_TYPES }));
+        let raw;
+        try {
+            raw = (await activePool.query({ text: sql, values: params, rowMode: 'array', types: values_1.RAW_TYPES }));
+        }
+        catch (err) {
+            // The error came through a database connection (a connect failure is already tagged as such).
+            throw (0, context_1.annotate)(err, { phase: 'query', operation: 'catalog' });
+        }
         const executionTime = Date.now() - startTime;
         const list = (Array.isArray(raw) ? raw : [raw]);
         // A script returns one result per statement: show the last one that has columns.

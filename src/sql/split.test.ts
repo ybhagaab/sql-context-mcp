@@ -25,6 +25,27 @@ describe('Property 7: splitter safety', () => {
     );
   });
 
+  test('each offset locates its statement in the original text', () => {
+    fc.assert(
+      fc.property(scriptArb, ({ script }) => {
+        const result = splitStatements(script);
+        expect(result.offsets).toHaveLength(result.statements.length);
+        result.statements.forEach((text, i) => {
+          expect(script.slice(result.offsets[i], result.offsets[i] + text.length)).toBe(text);
+        });
+        planScript(script).statements.forEach((s) => {
+          expect(script.slice(s.offset, s.offset + s.text.length)).toBe(s.text);
+        });
+      }),
+      { numRuns: 300 },
+    );
+    // A comment-only piece that repeats a later statement doesn't confuse the offsets.
+    const tricky = 'select 1; /* select 2 */ ; select 2';
+    expect(splitStatements(tricky).offsets).toEqual([0, tricky.lastIndexOf('select 2')]);
+    const broken = "  select 'oops";
+    expect(planScript(broken).statements[0]).toMatchObject({ text: "select 'oops", offset: 2 });
+  });
+
   test('unterminated quotes, identifiers, comments and dollar quotes are reported incomplete', () => {
     for (const sql of ["select 'abc", 'select "abc', 'select 1 /* open', 'select $$ body', 'select $t$ x $u$']) {
       expect(splitStatements(sql).complete).toBe(false);

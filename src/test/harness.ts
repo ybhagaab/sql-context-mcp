@@ -15,6 +15,42 @@ import { Lease } from '../db/lease';
 import { DEFAULTS, ServerConfig } from '../config';
 import { createRuntime, Runtime, RuntimeOptions } from '../runtime';
 import { handleToolCall, ToolExtra, ToolResult } from '../tools';
+import { __setNetworkForTests, ProbeOutcome } from '../errors/network';
+
+/**
+ * The network as seen by error descriptions and connection_status in tests: `fake-host` resolves
+ * to `addresses`, and a TCP check gets `probe`. No real DNS lookup or connection is made.
+ */
+export const fakeNetwork = {
+  addresses: ['10.0.0.5'] as string[],
+  lookupError: null as string | null,
+  probe: 'open' as ProbeOutcome,
+  lookups: 0,
+  probes: 0,
+  reset(): void {
+    this.addresses = ['10.0.0.5'];
+    this.lookupError = null;
+    this.probe = 'open';
+    this.lookups = 0;
+    this.probes = 0;
+  },
+};
+
+export function installFakeNetwork(): void {
+  fakeNetwork.reset();
+  __setNetworkForTests({
+    lookup: async () => {
+      fakeNetwork.lookups++;
+      if (fakeNetwork.lookupError) throw Object.assign(new Error(`getaddrinfo ${fakeNetwork.lookupError} fake-host`), { code: fakeNetwork.lookupError });
+      return fakeNetwork.addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 }));
+    },
+    probe: async (address, port, timeoutMs) => {
+      fakeNetwork.probes++;
+      const code = { refused: 'ECONNREFUSED', unreachable: 'EHOSTUNREACH' }[fakeNetwork.probe as string];
+      return { outcome: fakeNetwork.probe, address, port, timeoutMs, code, ms: fakeNetwork.probe === 'timeout' ? timeoutMs : 3 };
+    },
+  });
+}
 
 const ENV = {
   SQL_AUTH_METHOD: 'direct',
@@ -50,6 +86,7 @@ export function setupFakeDb(poolMax = 10): FakePool {
   }
   fakeDb.reset();
   __resetEngineCache();
+  installFakeNetwork();
   Lease.cancelGraceMs = 30;
   const pool = new FakePool({ max: poolMax });
   __setTestConnectionState({ pool: pool as never, iamCredentialsCache: null });
@@ -84,6 +121,7 @@ export async function teardown(): Promise<void> {
     else process.env[key] = value;
   }
   __setTestConnectionState({ pool: null, iamCredentialsCache: null });
+  __setNetworkForTests(null);
 }
 
 export function call(runtime: Runtime, name: string, args: unknown, extra: ToolExtra = {}, resourceLinks = true): Promise<ToolResult> {

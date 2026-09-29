@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CursorReader = exports.DeclareRejectedError = exports.CURSOR_NAME = void 0;
 exports.stripTrailingSemicolons = stripTrailingSemicolons;
+exports.declarePrefix = declarePrefix;
 const values_1 = require("../results/values");
 const pool_1 = require("./pool");
 exports.CURSOR_NAME = 'mcp_c';
@@ -16,6 +17,10 @@ exports.DeclareRejectedError = DeclareRejectedError;
 function stripTrailingSemicolons(sql) {
     return sql.trim().replace(/;+\s*$/, '').trim();
 }
+/** The text sent before the statement to open the cursor (error positions count it). */
+function declarePrefix(engine) {
+    return `DECLARE ${exports.CURSOR_NAME} ${engine.kind === 'postgres' ? 'SCROLL ' : ''}CURSOR FOR `;
+}
 class CursorReader {
     constructor(lease) {
         this.lease = lease;
@@ -28,7 +33,7 @@ class CursorReader {
         const statement = stripTrailingSemicolons(sql);
         await lease.query('BEGIN', opts);
         try {
-            await lease.query(`DECLARE ${exports.CURSOR_NAME} ${engine.kind === 'postgres' ? 'SCROLL ' : ''}CURSOR FOR ${statement}`, opts);
+            await lease.query(`${declarePrefix(engine)}${statement}`, opts);
         }
         catch (err) {
             if ((0, pool_1.isConnectionLevelError)(err))

@@ -24,6 +24,8 @@ import { streamQuery, RowPump, StreamField, StreamStatementResult } from '../db/
 import { resolveColumnTypes, typeLookupOn } from '../db/engine';
 import { ColumnInfo, columnsFromFields, toExact, ExactValue } from '../results/values';
 import { ExportFormat, FileRowWriter, RowWriter } from './writers';
+import { newSqlProgress, markSending, statementRef, wholeRef, annotateSqlError, summarizeStatement } from '../runner';
+import { describeError, errorText } from '../errors/describe';
 
 export type ExportState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -56,10 +58,6 @@ export interface ExportManagerOptions {
 
 const PREVIEW_ROWS = 10;
 
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const t = setTimeout(resolve, ms);
@@ -83,7 +81,10 @@ export class ExportJob {
   readonly queuedAt = Date.now();
   startedAt: number | null = null;
   finishedAt: number | null = null;
+  /** Why the job failed or was cancelled (the tool error text without its "Error: " prefix). */
   error: string | null = null;
+  /** The error type of a failed job (see the README's error types), when known. */
+  errorType: string | null = null;
   readonly done: Promise<void>;
   private readonly controller = new AbortController();
   private settleDone: () => void = () => undefined;
@@ -245,8 +246,14 @@ export class ExportManager {
       await fs.promises.rm(job.paths.partPath, { force: true }).catch(() => undefined);
       await fs.promises.rm(job.paths.schemaPath, { force: true }).catch(() => undefined);
       const cancelled = job.signal.aborted || err instanceof QueryCancelledError;
+      if (cancelled) {
+        job.error = 'The export was cancelled.';
+      } else {
+        const rendered = await describeError(err).catch(() => ({ type: null, text: `Error: ${errorText(err)}` }));
+        job.error = rendered.text.replace(/^Error: /, '');
+        job.errorType = rendered.type;
+      }
       job.state = cancelled ? 'cancelled' : 'failed';
-      job.error = cancelled ? 'The export was cancelled.' : describe(err);
     } finally {
       job.finishedAt = Date.now();
       job._settle();
@@ -268,13 +275,35 @@ export class ExportManager {
   private async execute(job: ExportJob, guard: FreeSpaceGuard, holder: { writer: RowWriter | null }): Promise<void> {
     const plan = planScript(job.request.sql);
     const whole = !plan.complete || plan.hasTransactionControl;
-    const state = { noRetry: false };
+    const state = newSqlProgress();
     const maxRows = minCap(job.request.maxRows, this.config.exportMaxRows);
     const maxBytes = minCap(job.request.maxBytes, this.config.exportMaxBytes);
     const timeoutMs = job.request.timeoutMs ?? this.config.statementTimeoutMs;
     const guardOpts: GuardOptions = { signal: job.signal, timeoutMs: timeoutMs > 0 ? timeoutMs : undefined };
     const openWriter = this.opts.openWriter ?? ((file: string, format: ExportFormat) => FileRowWriter.open(file, format));
 
+    try {
+      await this.executeAttempts(job, guard, holder, plan, whole, state, { maxRows, maxBytes, guardOpts, openWriter });
+    } catch (err) {
+      throw annotateSqlError(err, job.request.sql, plan, state, 'export_query');
+    }
+  }
+
+  private async executeAttempts(
+    job: ExportJob,
+    guard: FreeSpaceGuard,
+    holder: { writer: RowWriter | null },
+    plan: ReturnType<typeof planScript>,
+    whole: boolean,
+    state: ReturnType<typeof newSqlProgress>,
+    limits: {
+      maxRows: number | null;
+      maxBytes: number | null;
+      guardOpts: GuardOptions;
+      openWriter: (file: string, format: ExportFormat) => Promise<RowWriter>;
+    },
+  ): Promise<void> {
+    const { maxRows, maxBytes, guardOpts, openWriter } = limits;
     await withConnectionRetry(
       async (pool) => {
         // A retry starts the file again.
@@ -287,19 +316,26 @@ export class ExportManager {
         job.preview = [];
         job.truncated = false;
         job.columns = [];
+        state.sentThisAttempt = false;
+        state.completed = [];
+        state.current = null;
         const lease = await Lease.acquire(pool, { signal: job.signal });
         try {
           if (plan.changesSession) lease.markDiscard();
           let text = job.request.sql;
           if (!whole) {
-            for (const statement of plan.prefix) {
-              await streamQuery(lease, statement.text, { onRow: () => undefined }, guardOpts);
+            for (const [i, statement] of plan.prefix.entries()) {
+              let rows = 0;
+              markSending(state, statementRef(statement, i + 1));
+              const outcome = await streamQuery(lease, statement.text, { onRow: () => { rows++; } }, guardOpts);
               state.noRetry = true;
+              for (const r of outcome.results) state.completed.push(summarizeStatement(r, r.streamedIndex === null ? 0 : rows));
             }
             text = (plan.last as NonNullable<typeof plan.last>).text;
           } else if (plan.isScript) {
             state.noRetry = true;
           }
+          const ref = whole ? wholeRef(job.request.sql) : statementRef(plan.last as NonNullable<typeof plan.last>, plan.statements.length);
 
           holder.writer = await openWriter(job.paths.partPath, job.format);
           const fieldsByIndex = new Map<number, StreamField[]>();
@@ -363,6 +399,7 @@ export class ExportManager {
           );
 
           let results: StreamStatementResult[] | null = null;
+          markSending(state, ref);
           try {
             const outcome = await streamQuery(
               lease,
@@ -444,6 +481,7 @@ export function exportStatus(job: ExportJob, manager: ExportManager, clean: (tex
   if (job.state === 'queued') status.queuePosition = manager.queuePosition(job);
   if (job.state === 'done') Object.assign(status, exportResult(job, clean));
   if (job.state === 'failed' || job.state === 'cancelled') status.error = job.error;
+  if (job.state === 'failed' && job.errorType) status.errorType = job.errorType;
   return status;
 }
 

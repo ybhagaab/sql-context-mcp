@@ -19,8 +19,9 @@ import {
   PAGE_LIMITS,
 } from './validation/schemas.js';
 import { sanitizeString, sanitizeResponseText, truncateString } from './validation/sanitizer.js';
-import { ensurePool } from './db/pool';
 import { executeQuery } from './db/buffered';
+import { describeError } from './errors/describe';
+import { connectionStatus } from './diagnostics';
 import { runQuery, renderBuffered } from './runner';
 import { ProgressReporter } from './mcp/progress';
 import type { RenderedPage } from './results/page';
@@ -88,7 +89,8 @@ export const TOOLS: Tool[] = [
       'Execute SQL and stream the complete result to a local CSV or JSONL file, with no row or size limit. Returns the file path, a ' +
       'schema file path, the row count, the file size and a 10-row preview; the data itself is not returned in the response. Use it ' +
       'for complete datasets, for example to load into another tool. Values are exact and not sanitized (see format). For ' +
-      'long exports pass wait: false and poll export_status.',
+      'long exports pass wait: false and poll export_status. Export files are deleted when the server restarts, so move files ' +
+      'you want to keep.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -149,7 +151,12 @@ export const TOOLS: Tool[] = [
       required: ['table'],
     },
   },
-  { name: 'connection_status', description: 'Check the current database connection status', inputSchema: { type: 'object', properties: {} } },
+  {
+    name: 'connection_status',
+    description:
+      'Check the database connection. If it fails, reports which step failed (settings, DNS, network or VPN, TLS, login) and how to fix it.',
+    inputSchema: { type: 'object', properties: {} },
+  },
   {
     name: 'get_schema_context',
     description: 'IMPORTANT: Load schema knowledge, query patterns, and best practices for this database. Call this FIRST before writing queries to learn about table structures, required filters, and common patterns. Use list_presets to see available contexts.',
@@ -268,7 +275,10 @@ export async function handleToolCall(name: string, args: unknown, extra: ToolExt
           progress?.setProvider(() => exportProgress(job, rt.exports));
           await rt.exports.wait(job, extra.signal);
         });
-        if (job.state !== 'done') throw new Error(job.error ?? `The export ended as ${job.state}.`);
+        if (job.state !== 'done') {
+          // job.error is already the described error (without its "Error: " prefix).
+          return { content: [text(`Error: ${job.error ?? `The export ended as ${job.state}.`}`)], isError: true };
+        }
         const content = [jsonText(exportResult(job, sanitizeString))];
         if (ctx.resourceLinks) content.push(resourceLink(job));
         return { content };
@@ -325,21 +335,12 @@ export async function handleToolCall(name: string, args: unknown, extra: ToolExt
           timeoutMs: cfg.statementTimeoutMs,
           signal: extra.signal,
           progress,
+          operation: 'get_sample_data',
         }, rt));
         return pageResult(page);
       }
-      case 'connection_status': {
-        try {
-          const activePool = await ensurePool();
-          const result = await activePool.query(`
-            SELECT current_database() as database, current_user as user, inet_server_addr() as host
-          `);
-          const row = result.rows[0];
-          return { content: [text(`Connected\nDatabase: ${row.database}\nUser: ${row.user}\nHost: ${row.host || process.env.SQL_HOST}`)] };
-        } catch (error) {
-          return { content: [text(`Not connected: ${error instanceof Error ? error.message : 'Unknown error'}`)] };
-        }
-      }
+      case 'connection_status':
+        return { content: [text(await connectionStatus())] };
       case 'get_schema_context': {
         const validated = GetSchemaContextInputSchema.parse(args ?? {});
         const preset = await getPresetAsync(validated.preset);
@@ -379,7 +380,7 @@ export async function handleToolCall(name: string, args: unknown, extra: ToolExt
       const issues = error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
       return { content: [text(`Validation Error: ${issues}`)], isError: true };
     }
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return { content: [text(`Error: ${message}`)], isError: true };
+    const rendered = await describeError(error);
+    return { content: [text(rendered.text)], isError: true };
   }
 }

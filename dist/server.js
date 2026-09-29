@@ -15,7 +15,9 @@ Object.defineProperty(exports, "SERVER_NAME", { enumerable: true, get: function 
 Object.defineProperty(exports, "SERVER_VERSION", { enumerable: true, get: function () { return version_2.SERVER_VERSION; } });
 exports.SERVER_INSTRUCTIONS = 'Aggregate in SQL for analysis. run_query returns a page sized for model context, with the exact total; call fetch_rows ' +
     'with the resultId to continue. Use export_query for complete datasets; for long exports use wait: false and poll ' +
-    'export_status. Session settings don\'t persist between calls, so put SET and the query in the same call.';
+    'export_status. Session settings don\'t persist between calls, so put SET and the query in the same call. When a call ' +
+    'fails, the error names the likely cause and the fix, and says whether any SQL ran; connection_status checks settings, ' +
+    'DNS, network (VPN) and login step by step.';
 /** resource_link content items were added in MCP 2025-06-18. */
 const RESOURCE_LINK_PROTOCOL = '2025-06-18';
 function createMcpServer(runtime = runtime_1.getRuntime) {

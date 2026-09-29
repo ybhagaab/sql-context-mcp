@@ -8,6 +8,7 @@
  */
 import { withConnectionRetry } from './pool';
 import { RAW_TYPES } from '../results/values';
+import { annotate } from '../errors/context';
 
 export interface BufferedResult {
   columns: string[];
@@ -31,7 +32,13 @@ export async function executeQuery(sql: string, params?: unknown[]): Promise<Buf
     const startTime = Date.now();
     // Per-query checkout: `pool.query()` acquires a client from the pool, runs the query, and
     // releases it, so concurrent calls run in parallel on separate connections.
-    const raw = (await activePool.query({ text: sql, values: params, rowMode: 'array', types: RAW_TYPES } as never)) as unknown;
+    let raw: unknown;
+    try {
+      raw = (await activePool.query({ text: sql, values: params, rowMode: 'array', types: RAW_TYPES } as never)) as unknown;
+    } catch (err) {
+      // The error came through a database connection (a connect failure is already tagged as such).
+      throw annotate(err, { phase: 'query', operation: 'catalog' });
+    }
     const executionTime = Date.now() - startTime;
     const list = (Array.isArray(raw) ? raw : [raw]) as Array<RawResult | null | undefined>;
     // A script returns one result per statement: show the last one that has columns.

@@ -24,6 +24,11 @@ export function stripTrailingSemicolons(sql: string): string {
   return sql.trim().replace(/;+\s*$/, '').trim();
 }
 
+/** The text sent before the statement to open the cursor (error positions count it). */
+export function declarePrefix(engine: EngineInfo): string {
+  return `DECLARE ${CURSOR_NAME} ${engine.kind === 'postgres' ? 'SCROLL ' : ''}CURSOR FOR `;
+}
+
 export class CursorReader {
   fields: Array<{ name: string; dataTypeID: number }> | null = null;
   exhausted = false;
@@ -36,7 +41,7 @@ export class CursorReader {
     const statement = stripTrailingSemicolons(sql);
     await lease.query('BEGIN', opts);
     try {
-      await lease.query(`DECLARE ${CURSOR_NAME} ${engine.kind === 'postgres' ? 'SCROLL ' : ''}CURSOR FOR ${statement}`, opts);
+      await lease.query(`${declarePrefix(engine)}${statement}`, opts);
     } catch (err) {
       if (isConnectionLevelError(err)) throw err;
       await lease.query('ROLLBACK').catch(() => lease.markDiscard());

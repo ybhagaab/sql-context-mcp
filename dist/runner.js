@@ -1,5 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.newSqlProgress = newSqlProgress;
+exports.markSending = markSending;
+exports.statementRef = statementRef;
+exports.wholeRef = wholeRef;
+exports.annotateSqlError = annotateSqlError;
 exports.summarizeStatement = summarizeStatement;
 exports.estimateSpoolBytes = estimateSpoolBytes;
 exports.runQuery = runQuery;
@@ -9,10 +14,44 @@ const pool_1 = require("./db/pool");
 const lease_1 = require("./db/lease");
 const engine_1 = require("./db/engine");
 const cursor_1 = require("./db/cursor");
+const context_1 = require("./errors/context");
 const stream_1 = require("./db/stream");
 const page_1 = require("./results/page");
 const values_1 = require("./results/values");
 const store_1 = require("./results/store");
+function newSqlProgress() {
+    return { noRetry: false, sentCount: 0, sentThisAttempt: false, completed: [], current: null };
+}
+/** Records that `statement` is about to be sent. Data-changing SQL is never re-sent after a lost connection. */
+function markSending(state, ref) {
+    state.current = ref;
+    if (!state.sentThisAttempt) {
+        state.sentThisAttempt = true;
+        state.sentCount++;
+    }
+    if ((0, classify_1.mayChangeData)(ref.text))
+        state.noRetry = true;
+}
+function statementRef(statement, index, shift = 0) {
+    return { text: statement.text, offset: statement.offset, shift, index };
+}
+/** The whole text, sent as one request. */
+function wholeRef(sql) {
+    return { text: sql, offset: 0, shift: 0, index: null };
+}
+/** Adds what the call had done to its final error, for the error description. */
+function annotateSqlError(err, sql, plan, state, operation) {
+    (0, context_1.annotate)(err, { phase: 'query' });
+    return (0, context_1.setContext)(err, {
+        operation,
+        sql,
+        sentCount: state.sentCount,
+        completed: [...state.completed],
+        statement: state.current ?? undefined,
+        isScript: plan.isScript,
+        statementCount: plan.statements.length,
+    });
+}
 /** Rows written to a spool file per append on the streaming path. */
 const SPOOL_BATCH_ROWS = 1000;
 const COUNTED_COMMANDS = /^(INSERT|UPDATE|DELETE|MERGE|COPY|SELECT|MOVE|FETCH)$/;
@@ -46,62 +85,74 @@ async function runQuery(req, ctx) {
     if (plan.complete && plan.statements.length === 0)
         throw new classify_1.EmptySqlError();
     const started = Date.now();
-    const state = { noRetry: false };
-    return (0, pool_1.withConnectionRetry)(async (pool) => {
-        req.progress?.phase('waiting for a database connection');
-        const lease = await lease_1.Lease.acquire(pool, { signal: req.signal });
-        const hand = { off: false };
-        try {
-            if (plan.changesSession)
-                lease.markDiscard();
-            const engine = await (0, engine_1.detectEngine)(pool, lease);
-            req.progress?.phase('query running on the database');
-            if (!plan.complete || plan.hasTransactionControl) {
-                // Run the text as written, in one request, then discard the connection if it changed state.
-                if (plan.isScript)
-                    state.noRetry = true;
-                return await streamPath(lease, req.sql, [], req, ctx, state, started);
-            }
-            const statements = await runPrefix(lease, plan, req, state);
-            const last = plan.last;
-            if (last.kind === 'rows') {
-                try {
-                    return await cursorPath(lease, engine, last.text, statements, req, ctx, state, started, hand);
+    const state = newSqlProgress();
+    try {
+        return await (0, pool_1.withConnectionRetry)(async (pool) => {
+            state.sentThisAttempt = false;
+            state.completed = [];
+            state.current = null;
+            req.progress?.phase('waiting for a database connection');
+            const lease = await lease_1.Lease.acquire(pool, { signal: req.signal });
+            const hand = { off: false };
+            try {
+                if (plan.changesSession)
+                    lease.markDiscard();
+                const engine = await (0, engine_1.detectEngine)(pool, lease);
+                req.progress?.phase('query running on the database');
+                if (!plan.complete || plan.hasTransactionControl) {
+                    // Run the text as written, in one request, then discard the connection if it changed state.
+                    if (plan.isScript)
+                        state.noRetry = true;
+                    return await streamPath(lease, req.sql, wholeRef(req.sql), [], req, ctx, state, started);
                 }
-                catch (err) {
-                    if (!(err instanceof cursor_1.DeclareRejectedError))
-                        throw err;
-                    // DECLARE doesn't execute the query, so running it without a cursor is safe.
+                const statements = await runPrefix(lease, plan, req, state);
+                const last = plan.last;
+                const lastIndex = plan.statements.length;
+                if (last.kind === 'rows') {
+                    try {
+                        return await cursorPath(lease, engine, last, lastIndex, statements, req, ctx, state, started, hand);
+                    }
+                    catch (err) {
+                        if (!(err instanceof cursor_1.DeclareRejectedError))
+                            throw err;
+                        // DECLARE doesn't execute the query, so running it without a cursor is safe.
+                    }
                 }
+                return await streamPath(lease, last.text, statementRef(last, lastIndex), statements, req, ctx, state, started);
             }
-            return await streamPath(lease, last.text, statements, req, ctx, state, started);
-        }
-        catch (err) {
-            if ((0, pool_1.isConnectionLevelError)(err))
-                lease.markDiscard();
-            throw err;
-        }
-        finally {
-            if (!hand.off)
-                lease.release();
-        }
-    }, { canRetry: () => !state.noRetry });
+            catch (err) {
+                if ((0, pool_1.isConnectionLevelError)(err))
+                    lease.markDiscard();
+                throw err;
+            }
+            finally {
+                if (!hand.off)
+                    lease.release();
+            }
+        }, { canRetry: () => !state.noRetry });
+    }
+    catch (err) {
+        throw annotateSqlError(err, req.sql, plan, state, req.operation ?? 'run_query');
+    }
 }
 async function runPrefix(lease, plan, req, state) {
     const summaries = [];
     const guard = guardOf(req);
-    for (const statement of plan.prefix) {
+    for (const [i, statement] of plan.prefix.entries()) {
         const counts = new Map();
+        markSending(state, statementRef(statement, i + 1));
         const outcome = await (0, stream_1.streamQuery)(lease, statement.text, { onRow: (_row, index) => { counts.set(index, (counts.get(index) ?? 0) + 1); } }, guard);
         state.noRetry = true;
         for (const r of outcome.results)
             summaries.push(summarizeStatement(r, r.streamedIndex === null ? 0 : counts.get(r.streamedIndex) ?? 0));
+        state.completed = [...summaries];
     }
     return summaries;
 }
-async function cursorPath(lease, engine, text, statements, req, ctx, state, started, hand) {
+async function cursorPath(lease, engine, statement, index, statements, req, ctx, state, started, hand) {
     const guard = guardOf(req);
-    const reader = await cursor_1.CursorReader.open(lease, text, engine, guard);
+    markSending(state, statementRef(statement, index, (0, cursor_1.declarePrefix)(engine).length));
+    const reader = await cursor_1.CursorReader.open(lease, statement.text, engine, guard);
     try {
         const batch = (0, engine_1.fetchBatchSize)(ctx.config.fetchBatchRows, engine);
         // The first FETCH waits for the query to finish.
@@ -212,7 +263,8 @@ async function spoolFromCursor(session, lease, reader, initial, batch, timeoutMs
         lease.release();
     }
 }
-async function streamPath(lease, text, statements, req, ctx, state, started) {
+async function streamPath(lease, text, ref, statements, req, ctx, state, started) {
+    markSending(state, ref);
     const maxChars = effectiveMaxChars(req.maxChars, ctx.config);
     const ceiling = ctx.config.maxInlineCharsCeiling;
     const threshold = ctx.config.spoolThresholdBytes;

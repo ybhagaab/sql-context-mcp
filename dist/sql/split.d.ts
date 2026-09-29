@@ -11,6 +11,8 @@
  */
 export interface SplitResult {
     statements: string[];
+    /** Where each statement starts in the original text (UTF-16 index), for error positions. */
+    offsets: number[];
     complete: boolean;
 }
 /** Returns `stmt` with leading whitespace and comments removed. */

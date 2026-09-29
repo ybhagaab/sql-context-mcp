@@ -15,6 +15,17 @@ exports.Lease = exports.QueryTimeoutError = exports.QueryCancelledError = void 0
  */
 const pg_1 = require("pg");
 const pool_1 = require("./pool");
+const context_1 = require("../errors/context");
+/** Errors while getting a pooled connection happen before any SQL is sent. */
+function connectPhase(err, pool) {
+    if (err instanceof QueryCancelledError)
+        return err;
+    const options = pool.options;
+    const config = (0, pool_1.getLastConnectionConfig)();
+    const host = typeof options?.host === 'string' ? options.host : config?.host;
+    const port = Number(options?.port ?? config?.port) || null;
+    return (0, context_1.annotate)(err, { phase: 'connect', target: host ? { host, port } : undefined });
+}
 class QueryCancelledError extends Error {
     constructor(cause) {
         super('The query was cancelled.');
@@ -91,7 +102,9 @@ class Lease {
         const { signal } = opts;
         if (signal?.aborted)
             throw new QueryCancelledError();
-        const pending = pool.connect();
+        const pending = pool.connect().catch((err) => {
+            throw connectPhase(err, pool);
+        });
         if (!signal)
             return new Lease(await pending);
         const client = await new Promise((resolve, reject) => {
@@ -223,7 +236,9 @@ class Lease {
         await this.sqlCancel(config);
     }
     async sqlCancel(config) {
-        const side = new pg_1.Client(config);
+        // A bounded connect: when the network is down, the fallback must not hang.
+        const timeout = (0, pool_1.connectTimeoutMs)() || 10000;
+        const side = new pg_1.Client({ ...config, connectionTimeoutMillis: timeout });
         side.on?.('error', () => undefined);
         try {
             await side.connect();

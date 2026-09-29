@@ -12,6 +12,8 @@
 
 export interface SplitResult {
   statements: string[];
+  /** Where each statement starts in the original text (UTF-16 index), for error positions. */
+  offsets: number[];
   complete: boolean;
 }
 
@@ -51,13 +53,19 @@ function hasContent(stmt: string): boolean {
 
 export function splitStatements(sql: string): SplitResult {
   const statements: string[] = [];
+  const offsets: number[] = [];
   let start = 0;
   let i = 0;
   const n = sql.length;
+  const incomplete = (): SplitResult => ({ statements: [], offsets: [], complete: false });
 
   const push = (end: number) => {
-    const text = sql.slice(start, end).trim();
-    if (text && hasContent(text)) statements.push(text);
+    const raw = sql.slice(start, end);
+    const text = raw.trim();
+    if (text && hasContent(text)) {
+      statements.push(text);
+      offsets.push(start + (raw.length - raw.trimStart().length));
+    }
   };
 
   while (i < n) {
@@ -79,7 +87,7 @@ export function splitStatements(sql: string): SplitResult {
         else if (sql[i] === '*' && sql[i + 1] === '/') { depth--; i += 2; }
         else i++;
       }
-      if (depth > 0) return { statements: [], complete: false };
+      if (depth > 0) return incomplete();
       continue;
     }
 
@@ -97,7 +105,7 @@ export function splitStatements(sql: string): SplitResult {
         }
         i++;
       }
-      if (!closed) return { statements: [], complete: false };
+      if (!closed) return incomplete();
       continue;
     }
 
@@ -114,7 +122,7 @@ export function splitStatements(sql: string): SplitResult {
         }
         i++;
       }
-      if (!closed) return { statements: [], complete: false };
+      if (!closed) return incomplete();
       continue;
     }
 
@@ -124,7 +132,7 @@ export function splitStatements(sql: string): SplitResult {
       if (match) {
         const tag = match[0];
         const close = sql.indexOf(tag, i + tag.length);
-        if (close === -1) return { statements: [], complete: false };
+        if (close === -1) return incomplete();
         i = close + tag.length;
         continue;
       }
@@ -137,5 +145,5 @@ export function splitStatements(sql: string): SplitResult {
     i++;
   }
   push(n);
-  return { statements, complete: true };
+  return { statements, offsets, complete: true };
 }

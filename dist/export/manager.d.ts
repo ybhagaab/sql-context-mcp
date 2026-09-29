@@ -41,7 +41,10 @@ export declare class ExportJob {
     readonly queuedAt: number;
     startedAt: number | null;
     finishedAt: number | null;
+    /** Why the job failed or was cancelled (the tool error text without its "Error: " prefix). */
     error: string | null;
+    /** The error type of a failed job (see the README's error types), when known. */
+    errorType: string | null;
     readonly done: Promise<void>;
     private readonly controller;
     private settleDone;
@@ -81,6 +84,7 @@ export declare class ExportManager {
     private run;
     private sidecar;
     private execute;
+    private executeAttempts;
 }
 /** The result of a finished export, as shown to callers. `clean` sanitizes inline strings. */
 export declare function exportResult(job: ExportJob, clean: (text: string) => string): Record<string, unknown>;

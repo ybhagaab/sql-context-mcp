@@ -14,6 +14,8 @@ export declare class DeclareRejectedError extends Error {
     constructor(cause: unknown);
 }
 export declare function stripTrailingSemicolons(sql: string): string;
+/** The text sent before the statement to open the cursor (error positions count it). */
+export declare function declarePrefix(engine: EngineInfo): string;
 export declare class CursorReader {
     private readonly lease;
     fields: Array<{

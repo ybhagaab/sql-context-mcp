@@ -14,6 +14,7 @@ const MB = 1024 * 1024;
 const GB = 1024 * MB;
 exports.DEFAULTS = Object.freeze({
     poolMax: 10,
+    connectTimeoutMs: 10000,
     defaultMaxRows: 100,
     maxInlineChars: 100000,
     maxInlineCharsCeiling: 5000000,
@@ -89,6 +90,7 @@ function loadConfig(env = process.env, warn = warnOnce) {
     const exportDirRaw = env.SQL_EXPORT_DIR;
     return {
         poolMax,
+        connectTimeoutMs: readInt(env, 'SQL_CONNECT_TIMEOUT_MS', exports.DEFAULTS.connectTimeoutMs, 0, 600000, warn),
         defaultMaxRows: readInt(env, 'SQL_DEFAULT_MAX_ROWS', exports.DEFAULTS.defaultMaxRows, 1, 1000000, warn),
         maxInlineChars,
         maxInlineCharsCeiling,

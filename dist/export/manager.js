@@ -62,10 +62,9 @@ const stream_1 = require("../db/stream");
 const engine_1 = require("../db/engine");
 const values_1 = require("../results/values");
 const writers_1 = require("./writers");
+const runner_1 = require("../runner");
+const describe_1 = require("../errors/describe");
 const PREVIEW_ROWS = 10;
-function describe(err) {
-    return err instanceof Error ? err.message : String(err);
-}
 function sleep(ms) {
     return new Promise((resolve) => {
         const t = setTimeout(resolve, ms);
@@ -92,7 +91,10 @@ class ExportJob {
         this.queuedAt = Date.now();
         this.startedAt = null;
         this.finishedAt = null;
+        /** Why the job failed or was cancelled (the tool error text without its "Error: " prefix). */
         this.error = null;
+        /** The error type of a failed job (see the README's error types), when known. */
+        this.errorType = null;
         this.controller = new AbortController();
         this.settleDone = () => undefined;
         this.done = new Promise((resolve) => {
@@ -244,8 +246,15 @@ class ExportManager {
             await fs.promises.rm(job.paths.partPath, { force: true }).catch(() => undefined);
             await fs.promises.rm(job.paths.schemaPath, { force: true }).catch(() => undefined);
             const cancelled = job.signal.aborted || err instanceof lease_1.QueryCancelledError;
+            if (cancelled) {
+                job.error = 'The export was cancelled.';
+            }
+            else {
+                const rendered = await (0, describe_1.describeError)(err).catch(() => ({ type: null, text: `Error: ${(0, describe_1.errorText)(err)}` }));
+                job.error = rendered.text.replace(/^Error: /, '');
+                job.errorType = rendered.type;
+            }
             job.state = cancelled ? 'cancelled' : 'failed';
-            job.error = cancelled ? 'The export was cancelled.' : describe(err);
         }
         finally {
             job.finishedAt = Date.now();
@@ -266,12 +275,21 @@ class ExportManager {
     async execute(job, guard, holder) {
         const plan = (0, classify_1.planScript)(job.request.sql);
         const whole = !plan.complete || plan.hasTransactionControl;
-        const state = { noRetry: false };
+        const state = (0, runner_1.newSqlProgress)();
         const maxRows = minCap(job.request.maxRows, this.config.exportMaxRows);
         const maxBytes = minCap(job.request.maxBytes, this.config.exportMaxBytes);
         const timeoutMs = job.request.timeoutMs ?? this.config.statementTimeoutMs;
         const guardOpts = { signal: job.signal, timeoutMs: timeoutMs > 0 ? timeoutMs : undefined };
         const openWriter = this.opts.openWriter ?? ((file, format) => writers_1.FileRowWriter.open(file, format));
+        try {
+            await this.executeAttempts(job, guard, holder, plan, whole, state, { maxRows, maxBytes, guardOpts, openWriter });
+        }
+        catch (err) {
+            throw (0, runner_1.annotateSqlError)(err, job.request.sql, plan, state, 'export_query');
+        }
+    }
+    async executeAttempts(job, guard, holder, plan, whole, state, limits) {
+        const { maxRows, maxBytes, guardOpts, openWriter } = limits;
         await (0, pool_1.withConnectionRetry)(async (pool) => {
             // A retry starts the file again.
             if (holder.writer) {
@@ -283,21 +301,29 @@ class ExportManager {
             job.preview = [];
             job.truncated = false;
             job.columns = [];
+            state.sentThisAttempt = false;
+            state.completed = [];
+            state.current = null;
             const lease = await lease_1.Lease.acquire(pool, { signal: job.signal });
             try {
                 if (plan.changesSession)
                     lease.markDiscard();
                 let text = job.request.sql;
                 if (!whole) {
-                    for (const statement of plan.prefix) {
-                        await (0, stream_1.streamQuery)(lease, statement.text, { onRow: () => undefined }, guardOpts);
+                    for (const [i, statement] of plan.prefix.entries()) {
+                        let rows = 0;
+                        (0, runner_1.markSending)(state, (0, runner_1.statementRef)(statement, i + 1));
+                        const outcome = await (0, stream_1.streamQuery)(lease, statement.text, { onRow: () => { rows++; } }, guardOpts);
                         state.noRetry = true;
+                        for (const r of outcome.results)
+                            state.completed.push((0, runner_1.summarizeStatement)(r, r.streamedIndex === null ? 0 : rows));
                     }
                     text = plan.last.text;
                 }
                 else if (plan.isScript) {
                     state.noRetry = true;
                 }
+                const ref = whole ? (0, runner_1.wholeRef)(job.request.sql) : (0, runner_1.statementRef)(plan.last, plan.statements.length);
                 holder.writer = await openWriter(job.paths.partPath, job.format);
                 const fieldsByIndex = new Map();
                 let currentIndex = -1;
@@ -361,6 +387,7 @@ class ExportManager {
                     return write(row);
                 }, { highWater: this.opts.highWater ?? 1000, onError: () => void lease.cancel() });
                 let results = null;
+                (0, runner_1.markSending)(state, ref);
                 try {
                     const outcome = await (0, stream_1.streamQuery)(lease, text, {
                         onResultSet: (fields, index) => { fieldsByIndex.set(index, fields); },
@@ -445,6 +472,8 @@ function exportStatus(job, manager, clean) {
         Object.assign(status, exportResult(job, clean));
     if (job.state === 'failed' || job.state === 'cancelled')
         status.error = job.error;
+    if (job.state === 'failed' && job.errorType)
+        status.errorType = job.errorType;
     return status;
 }
 /** Progress for a job, for MCP progress notifications. */

@@ -1,0 +1,1 @@
+{"version":3,"file":"sqlstate.d.ts","sourceRoot":"","sources":["../../src/errors/sqlstate.ts"],"names":[],"mappings":"AAqFA,wBAAgB,YAAY,CAAC,IAAI,EAAE,MAAM,GAAG,MAAM,GAAG,IAAI,CAExD;AAED,4FAA4F;AAC5F,wBAAgB,aAAa,CAAC,IAAI,EAAE,MAAM,GAAG,MAAM,CAGlD"}

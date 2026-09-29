@@ -37,11 +37,20 @@ export declare function __getTestConnectionState(): {
 export declare function buildSSLConfig(): boolean | object;
 export declare function getPoolMax(): number;
 /**
+ * Resolves the connection settings, including IAM or Secrets Manager credentials. Errors are
+ * tagged with the phase that failed (`config` or `credentials`).
+ */
+export declare function resolveConnectionConfig(): Promise<ConnectionConfig>;
+/** The connect timeout in force (SQL_CONNECT_TIMEOUT_MS; 0 means none). */
+export declare function connectTimeoutMs(): number;
+/**
  * Classifies an error as connection-level (socket/connection fault, eligible for the bounded
  * reconnect-and-retry) vs application-level (ZodError, SQL syntax/constraint errors, or anything
  * else), which must never be retried.
  */
 export declare function isConnectionLevelError(error: unknown): boolean;
+/** Connection attempts allowed when each one ends in a connect timeout. */
+export declare const CONNECT_TIMEOUT_ATTEMPTS = 2;
 /**
  * Discards a pool so the next `ensurePool()` call rebuilds from scratch, without blocking the
  * caller on in-flight queries.

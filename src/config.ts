@@ -8,6 +8,8 @@
 
 export interface ServerConfig {
   poolMax: number;
+  /** How long one connection attempt (network, TLS and login) may take; 0 waits for the OS. */
+  connectTimeoutMs: number;
   defaultMaxRows: number;
   maxInlineChars: number;
   maxInlineCharsCeiling: number;
@@ -30,6 +32,7 @@ const GB = 1024 * MB;
 
 export const DEFAULTS: ServerConfig = Object.freeze({
   poolMax: 10,
+  connectTimeoutMs: 10_000,
   defaultMaxRows: 100,
   maxInlineChars: 100_000,
   maxInlineCharsCeiling: 5_000_000,
@@ -113,6 +116,7 @@ export function loadConfig(env: Env = process.env, warn: Warn = warnOnce): Serve
   const exportDirRaw = env.SQL_EXPORT_DIR;
   return {
     poolMax,
+    connectTimeoutMs: readInt(env, 'SQL_CONNECT_TIMEOUT_MS', DEFAULTS.connectTimeoutMs, 0, 600_000, warn),
     defaultMaxRows: readInt(env, 'SQL_DEFAULT_MAX_ROWS', DEFAULTS.defaultMaxRows, 1, 1_000_000, warn),
     maxInlineChars,
     maxInlineCharsCeiling,

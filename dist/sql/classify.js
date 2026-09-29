@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.EmptySqlError = void 0;
+exports.mayChangeData = mayChangeData;
 exports.classifyStatement = classifyStatement;
 exports.planScript = planScript;
 /**
@@ -15,6 +16,14 @@ exports.planScript = planScript;
  * | anything else                                         | other       |
  */
 const split_1 = require("./split");
+const DATA_CHANGE = /\b(insert|update|delete|merge|create|drop|alter|truncate|copy|unload|grant|revoke|call|into)\b/i;
+/**
+ * True when the text may change data or schema. Deliberately broad (a keyword inside a string
+ * literal also counts): it decides whether re-running the text could apply a change twice.
+ */
+function mayChangeData(text) {
+    return DATA_CHANGE.test(text);
+}
 const TRANSACTION_KEYWORDS = new Set(['begin', 'start', 'commit', 'end', 'rollback', 'abort', 'declare', 'fetch', 'move', 'close']);
 const SESSION_KEYWORDS = new Set(['set', 'reset']);
 function leadingKeywords(text, count) {
@@ -24,7 +33,7 @@ function leadingKeywords(text, count) {
     const words = rest.match(/^[A-Za-z_]+(?:\s+[A-Za-z_]+){0,3}/);
     return words ? words[0].toLowerCase().split(/\s+/).slice(0, count) : [];
 }
-function classifyStatement(text) {
+function classifyStatement(text, offset = 0) {
     const words = leadingKeywords(text, 4);
     const keyword = words[0] ?? '';
     let kind = 'other';
@@ -48,7 +57,7 @@ function classifyStatement(text) {
             changesSession = true;
         }
     }
-    return { text, keyword, kind, changesSession };
+    return { text, keyword, kind, changesSession, offset };
 }
 class EmptySqlError extends Error {
     constructor() {
@@ -60,8 +69,8 @@ exports.EmptySqlError = EmptySqlError;
 function planScript(sql) {
     const split = (0, split_1.splitStatements)(sql);
     const statements = split.complete
-        ? split.statements.map(classifyStatement)
-        : [classifyStatement(sql.trim())];
+        ? split.statements.map((text, i) => classifyStatement(text, split.offsets[i]))
+        : [classifyStatement(sql.trim(), sql.length - sql.trimStart().length)];
     const isScript = statements.length > 1;
     const hasTransactionControl = statements.some((s) => s.kind === 'transaction');
     const changesSession = isScript || statements.some((s) => s.changesSession);

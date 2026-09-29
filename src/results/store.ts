@@ -23,6 +23,8 @@ import { Lease, QueryCancelledError, GuardOptions } from '../db/lease';
 import type { CursorReader } from '../db/cursor';
 import type { ProgressReporter } from '../mcp/progress';
 import { formatElapsed } from '../mcp/progress';
+import { errorText } from '../errors/describe';
+import { annotate } from '../errors/context';
 
 export type SessionMode = 'spooling' | 'spooled' | 'cursor' | 'closed' | 'expired' | 'evicted' | 'failed';
 
@@ -81,9 +83,8 @@ export class SpoolLimitError extends Error {
   }
 }
 
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
+/** A one-line description of an error, never blank. */
+const describe = errorText;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -735,7 +736,10 @@ export class ResultStore {
           executionTimeMs: Date.now() - started,
         });
       } catch (err) {
-        if (!(err instanceof RowTooLargeError) && !(err instanceof OffsetOutOfRangeError)) await s.close('failed', describe(err));
+        if (!(err instanceof RowTooLargeError) && !(err instanceof OffsetOutOfRangeError)) {
+          await s.close('failed', describe(err));
+          annotate(err, { phase: 'query', operation: 'fetch_rows', resultClosed: true });
+        }
         throw err;
       } finally {
         if (s.mode === 'cursor') s.armIdle();
