@@ -61,6 +61,85 @@ function errorResponse(code: string, message: string): Buffer {
   return Buffer.concat([header, fields]);
 }
 
+function int32(n: number): Buffer {
+  const b = Buffer.alloc(4);
+  b.writeInt32BE(n);
+  return b;
+}
+
+function int16(n: number): Buffer {
+  const b = Buffer.alloc(2);
+  b.writeInt16BE(n);
+  return b;
+}
+
+function cstr(s: string): Buffer {
+  return Buffer.from(`${s}\0`, 'utf8');
+}
+
+/** A PostgreSQL protocol message: type byte, length, body. */
+function message(type: string, ...parts: Buffer[]): Buffer {
+  const body = Buffer.concat(parts);
+  const header = Buffer.alloc(5);
+  header.write(type, 0, 'ascii');
+  header.writeInt32BE(body.length + 4, 1);
+  return Buffer.concat([header, body]);
+}
+
+/**
+ * A minimal PostgreSQL server: asks for a cleartext password (recorded in `seen`), accepts only
+ * `expected`, and answers every simple query with one row of text columns.
+ */
+function passwordServer(expected: string, seen: string[], row: Record<string, string>): Promise<TestServer> {
+  const names = Object.keys(row);
+  const values = Object.values(row);
+  const result = Buffer.concat([
+    message('T', int16(names.length), ...names.map((n) => Buffer.concat([cstr(n), int32(0), int16(0), int32(25), int16(-1), int32(-1), int16(0)]))),
+    message('D', int16(values.length), ...values.map((v) => Buffer.concat([int32(Buffer.byteLength(v)), Buffer.from(v, 'utf8')]))),
+    message('C', cstr('SELECT 1')),
+    message('Z', Buffer.from('I')),
+  ]);
+  return listen((socket) => {
+    let buf = Buffer.alloc(0);
+    let started = false;
+    socket.on('data', (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      for (;;) {
+        if (!started) {
+          // StartupMessage: length, protocol version, parameters (no type byte).
+          if (buf.length < 4) return;
+          const length = buf.readInt32BE(0);
+          if (buf.length < length) return;
+          buf = buf.subarray(length);
+          started = true;
+          socket.write(message('R', int32(3)));
+          continue;
+        }
+        if (buf.length < 5) return;
+        const length = buf.readInt32BE(1);
+        if (buf.length < 1 + length) return;
+        const type = String.fromCharCode(buf[0]);
+        const body = buf.subarray(5, 1 + length);
+        buf = buf.subarray(1 + length);
+        if (type === 'p') {
+          const password = body.toString('utf8').replace(/\0$/, '');
+          seen.push(password);
+          if (password !== expected) {
+            socket.end(errorResponse('28P01', 'password authentication failed for user "someone"'));
+            return;
+          }
+          socket.write(Buffer.concat([message('R', int32(0)), message('K', int32(4242), int32(7)), message('Z', Buffer.from('I'))]));
+        } else if (type === 'Q') {
+          socket.write(result);
+        } else if (type === 'X') {
+          socket.end();
+          return;
+        }
+      }
+    });
+  });
+}
+
 function useServer(port: number, sslMode = 'disable'): void {
   Object.assign(process.env, {
     SQL_AUTH_METHOD: 'direct',
@@ -160,6 +239,37 @@ describe('connection failures with the real driver', () => {
     expect(status.state).toBe('failed');
     expect(status.errorType).toBe('connection_refused');
     expect(status.error).toMatch(/^The database server at 127\.0\.0\.1:\d+ refused the connection/);
+  });
+});
+
+describe('logging in with the real driver and pool', () => {
+  test('the password reaches the server when the connect timeout is on (the 1.5.1 login bug)', async () => {
+    const seen: string[] = [];
+    const server = await passwordServer('secret', seen, {
+      database: 'db', user: 'someone', host: '127.0.0.1', version: 'PostgreSQL 16.4 (test server)',
+    });
+    useServer(server.port);
+    expect(process.env.SQL_CONNECT_TIMEOUT_MS).toBe('300');
+    const result = await call(rt, 'connection_status', {});
+    const lines = textOf(result).split('\n');
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((p) => p === 'secret')).toBe(true);
+    expect(lines.slice(0, 4)).toEqual(['Connected', 'Database: db', 'User: someone', 'Host: 127.0.0.1']);
+    expect(lines[4]).toBe('Server: PostgreSQL 16.4 (test server)');
+    expect(lines[5]).toMatch(/^Round trip: \d+ ms$/);
+    expect(lines[6]).toMatch(/^Pool: \d+ in use, \d+ idle, 0 waiting \(max 10\)$/);
+    expect(lines).toHaveLength(7);
+  });
+
+  test('queries run on pooled connections that logged in with the password', async () => {
+    const seen: string[] = [];
+    const server = await passwordServer('secret', seen, { schema_name: 'analytics' });
+    useServer(server.port);
+    const text = textOf(await call(rt, 'list_schemas', {}));
+    expect(text).toContain('analytics');
+    expect(text).toMatch(/1 rows returned\./);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((p) => p === 'secret')).toBe(true);
   });
 });
 

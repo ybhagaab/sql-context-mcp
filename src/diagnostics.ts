@@ -18,6 +18,7 @@ import {
   discardPool,
   isConnectionLevelError,
   connectTimeoutMs,
+  withConnectTimeout,
   getPoolMax,
   ConnectionConfig,
 } from './db/pool';
@@ -76,7 +77,7 @@ async function queryInfo(pool: Pool): Promise<Info> {
 /** Logs in on a new connection outside the pool (used when the pool is busy or not answering). */
 async function sideClientInfo(config: ConnectionConfig): Promise<Info> {
   const timeout = connectTimeoutMs() || 10_000;
-  const client = new Client({ ...config, connectionTimeoutMillis: timeout } as never) as unknown as {
+  const client = new Client(withConnectTimeout(config as unknown as Record<string, unknown>, timeout) as never) as unknown as {
     connect: () => Promise<unknown>;
     query: (text: string) => Promise<{ rows?: unknown[] }>;
     end: () => Promise<void>;

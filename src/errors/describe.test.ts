@@ -364,6 +364,18 @@ describe('SQL errors', () => {
     );
   });
 
+  test('a Redshift message with line breaks stays on the first line', async () => {
+    const sql = 'select 1 as a,\n  from t';
+    const message = 'syntax error at or near "from" in context "as a,\n  from", at line 2, column 3';
+    const err = annotate(dbError('42601', message, { position: '18' }), {
+      phase: 'query', sql, sentCount: 1, statement: { text: sql, offset: 0, shift: 0, index: 1 }, statementCount: 1,
+    });
+    const out = await text(err);
+    expect(out.split('\n')[0]).toBe('Error: syntax error at or near "from" in context "as a, from", at line 2, column 3');
+    expect(out).toContain('At line 2, column 3:\n    from t\n    ^');
+    expect(errorText(new Error('first\r\n   second\nthird'))).toBe('first second third');
+  });
+
   test('a cursor query: the DECLARE prefix is not counted', async () => {
     const statement = 'select x from t';
     const err = annotate(dbError('42703', 'column "x" does not exist', { position: String('DECLARE mcp_c CURSOR FOR '.length + 8) }), {

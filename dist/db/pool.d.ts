@@ -44,6 +44,14 @@ export declare function resolveConnectionConfig(): Promise<ConnectionConfig>;
 /** The connect timeout in force (SQL_CONNECT_TIMEOUT_MS; 0 means none). */
 export declare function connectTimeoutMs(): number;
 /**
+ * The pool's client options plus `connectionTimeoutMillis` (unchanged when the timeout is 0).
+ *
+ * pg-pool keeps the password as a non-enumerable property of its options, to keep it out of logs.
+ * An object spread would drop it, and the connection would log in without a password (the 1.5.1
+ * bug), so every property descriptor is copied, hidden ones included.
+ */
+export declare function withConnectTimeout(config: Record<string, unknown> | undefined, timeoutMs: number): Record<string, unknown> | undefined;
+/**
  * Classifies an error as connection-level (socket/connection fault, eligible for the bounded
  * reconnect-and-retry) vs application-level (ZodError, SQL syntax/constraint errors, or anything
  * else), which must never be retried.

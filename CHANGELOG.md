@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.2
+
+### Fixed
+
+- 1.5.1 couldn't log in: every connection failed with `password authentication failed`, whatever
+  the authentication method. The new per-connection connect timeout copied the pool's connection
+  settings without the password, which the pool keeps as a hidden property. Connections log in
+  again. If you're on 1.5.1, update; until then, `SQL_CONNECT_TIMEOUT_MS=0` works around it.
+- Redshift syntax errors quote the SQL around the error, including its line breaks. The error's
+  first line now stays one line.
+
 ## 1.5.1
 
 ### Changed: errors say what failed and how to fix it

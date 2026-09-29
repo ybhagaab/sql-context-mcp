@@ -184,7 +184,8 @@ function errorText(err) {
         }
         return '';
     };
-    return describe(err, 0) || 'Unknown error (no message)';
+    // One line: Redshift syntax errors quote the SQL around the error, line breaks included.
+    return (describe(err, 0) || 'Unknown error (no message)').replace(/\s*\r?\n\s*/g, ' ');
 }
 function isErrnoCode(code) {
     return !!code && /^E[A-Z0-9_]+$/.test(code);

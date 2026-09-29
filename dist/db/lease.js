@@ -237,8 +237,7 @@ class Lease {
     }
     async sqlCancel(config) {
         // A bounded connect: when the network is down, the fallback must not hang.
-        const timeout = (0, pool_1.connectTimeoutMs)() || 10000;
-        const side = new pg_1.Client({ ...config, connectionTimeoutMillis: timeout });
+        const side = new pg_1.Client((0, pool_1.withConnectTimeout)(config, (0, pool_1.connectTimeoutMs)() || 10000));
         side.on?.('error', () => undefined);
         try {
             await side.connect();

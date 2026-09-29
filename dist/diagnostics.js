@@ -51,7 +51,7 @@ async function queryInfo(pool) {
 /** Logs in on a new connection outside the pool (used when the pool is busy or not answering). */
 async function sideClientInfo(config) {
     const timeout = (0, pool_1.connectTimeoutMs)() || 10000;
-    const client = new pg_1.Client({ ...config, connectionTimeoutMillis: timeout });
+    const client = new pg_1.Client((0, pool_1.withConnectTimeout)(config, timeout));
     client.on?.('error', () => undefined);
     try {
         try {

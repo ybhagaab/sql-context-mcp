@@ -254,6 +254,23 @@ interface ConnectableClient {
 }
 
 /**
+ * The pool's client options plus `connectionTimeoutMillis` (unchanged when the timeout is 0).
+ *
+ * pg-pool keeps the password as a non-enumerable property of its options, to keep it out of logs.
+ * An object spread would drop it, and the connection would log in without a password (the 1.5.1
+ * bug), so every property descriptor is copied, hidden ones included.
+ */
+export function withConnectTimeout(
+  config: Record<string, unknown> | undefined,
+  timeoutMs: number,
+): Record<string, unknown> | undefined {
+  if (!(timeoutMs > 0)) return config;
+  const options = Object.defineProperties({}, Object.getOwnPropertyDescriptors(config ?? {})) as Record<string, unknown>;
+  options.connectionTimeoutMillis = timeoutMs;
+  return options;
+}
+
+/**
  * The client class the pool uses for new connections: pg's Client with the connect timeout
  * applied to that one connection, and connect errors tagged with the connect phase and target
  * (so no SQL is reported as sent). The timeout is per connection on purpose: pg-pool's own
@@ -272,7 +289,7 @@ function connectingClientClass(timeoutMs: number): unknown {
   if (typeof Base !== 'function') return undefined;
   const Ctor = Base as new (config?: Record<string, unknown>) => ConnectableClient;
   return function ConnectingClient(config?: Record<string, unknown>): ConnectableClient {
-    const client = new Ctor(timeoutMs > 0 ? { ...(config ?? {}), connectionTimeoutMillis: timeoutMs } : config);
+    const client = new Ctor(withConnectTimeout(config, timeoutMs));
     const connect = client.connect.bind(client);
     const target = (): ConnectTarget => ({
       host: String(client.host ?? config?.host ?? ''),

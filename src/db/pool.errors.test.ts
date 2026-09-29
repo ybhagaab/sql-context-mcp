@@ -7,7 +7,7 @@ import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('pg', async () => (await import('../test/fake-pg')).fakePgModule);
 
-import { isConnectionLevelError, withConnectionRetry, MAX_QUERY_ATTEMPTS, CONNECT_TIMEOUT_ATTEMPTS } from './pool';
+import { isConnectionLevelError, withConnectionRetry, withConnectTimeout, MAX_QUERY_ATTEMPTS, CONNECT_TIMEOUT_ATTEMPTS } from './pool';
 import { annotate, contextOf } from '../errors/context';
 import { setupFakeDb, teardown } from '../test/harness';
 
@@ -71,5 +71,25 @@ describe('retry gating', () => {
     await expect(withConnectionRetry(async () => { calls++; throw err; })).rejects.toBe(err);
     expect(calls).toBe(1);
     expect(contextOf(err).attempts).toBe(1);
+  });
+});
+
+describe('withConnectTimeout (the per-connection client options)', () => {
+  test('keeps the hidden password that pg-pool stores as a non-enumerable property', () => {
+    const options: Record<string, unknown> = { host: 'h', user: 'u', ssl: false };
+    Object.defineProperty(options, 'password', { value: 'secret', enumerable: false, writable: true, configurable: true });
+    const out = withConnectTimeout(options, 5_000) as Record<string, unknown>;
+    expect(out.password).toBe('secret');
+    expect(Object.keys(out)).not.toContain('password');
+    expect(out).toMatchObject({ host: 'h', user: 'u', ssl: false, connectionTimeoutMillis: 5_000 });
+    // The pool's own options are left alone.
+    expect(options.connectionTimeoutMillis).toBeUndefined();
+  });
+
+  test('a timeout of 0 passes the options through unchanged', () => {
+    const options = { host: 'h' };
+    expect(withConnectTimeout(options, 0)).toBe(options);
+    expect(withConnectTimeout(undefined, 0)).toBeUndefined();
+    expect(withConnectTimeout(undefined, 10)).toEqual({ connectionTimeoutMillis: 10 });
   });
 });

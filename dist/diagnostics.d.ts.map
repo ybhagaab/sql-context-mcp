@@ -1,1 +1,1 @@
-{"version":3,"file":"diagnostics.d.ts","sourceRoot":"","sources":["../src/diagnostics.ts"],"names":[],"mappings":"AA2BA,eAAO,MAAM,QAAQ,kHAAkH,CAAC;AAExI,gDAAgD;AAChD,eAAO,MAAM,YAAY;;;CAAiD,CAAC;AAuK3E,iDAAiD;AACjD,wBAAsB,gBAAgB,IAAI,OAAO,CAAC,MAAM,CAAC,CAMxD"}
+{"version":3,"file":"diagnostics.d.ts","sourceRoot":"","sources":["../src/diagnostics.ts"],"names":[],"mappings":"AA4BA,eAAO,MAAM,QAAQ,kHAAkH,CAAC;AAExI,gDAAgD;AAChD,eAAO,MAAM,YAAY;;;CAAiD,CAAC;AAuK3E,iDAAiD;AACjD,wBAAsB,gBAAgB,IAAI,OAAO,CAAC,MAAM,CAAC,CAMxD"}

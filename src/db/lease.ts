@@ -11,7 +11,7 @@
  *   separate socket (no pool slot needed), falling back to pg_cancel_backend(pid).
  */
 import { Client, Pool, PoolClient } from 'pg';
-import { getLastConnectionConfig, connectTimeoutMs } from './pool';
+import { getLastConnectionConfig, connectTimeoutMs, withConnectTimeout } from './pool';
 import { annotate } from '../errors/context';
 
 /** Errors while getting a pooled connection happen before any SQL is sent. */
@@ -258,8 +258,7 @@ export class Lease {
 
   private async sqlCancel(config: Record<string, unknown>): Promise<void> {
     // A bounded connect: when the network is down, the fallback must not hang.
-    const timeout = connectTimeoutMs() || 10_000;
-    const side = new Client({ ...config, connectionTimeoutMillis: timeout }) as unknown as {
+    const side = new Client(withConnectTimeout(config, connectTimeoutMs() || 10_000)) as unknown as {
       connect: () => Promise<void>;
       query: (text: string, values: unknown[]) => Promise<unknown>;
       end: () => Promise<void>;

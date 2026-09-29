@@ -272,7 +272,10 @@ describe.skipIf(!LIVE_ENABLED || !TABLE)('live: Redshift', () => {
     // A trailing comma before FROM: the error points at "from" on line 2.
     const syntax = text(await call(rt, 'run_query', { sql: 'select 1 as a,\n  from t' }));
     log(`syntax error:\n${syntax}`);
-    expect(syntax.split('\n')[0]).toBe('Error: syntax error at or near "from"');
+    // Redshift quotes the SQL around the error in its message; it stays on the first line.
+    const first = syntax.split('\n')[0];
+    expect(first).toMatch(/^Error: syntax error at or near "from"/);
+    expect(first).toContain('at line 2, column 3');
     expect(syntax).toContain('At line 2, column 3:\n    from t\n    ^');
     expect(syntax).toMatch(/Error type: sql_error \(SQLSTATE 42601 syntax_error\)\.$/);
   }, 60_000);

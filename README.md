@@ -205,15 +205,16 @@ Error type: network_timeout. No SQL was run.
 ```
 
 Database errors keep the database's message on the first line. They add the SQLSTATE, the
-database's detail and hint, and the error position as a line and column of your SQL:
+database's detail and hint, and, when the database reports one, the error position as a line and
+column of your SQL. On Redshift:
 
 ```
-Error: relation "custmers" does not exist
-To fix: Check the table name and schema (list_schemas and list_tables show what exists), and write it as schema.table if it is not in the search path.
-At line 4, column 6:
-  join custmers b on b.id = a.cid
-       ^
-Error type: sql_error (SQLSTATE 42P01 undefined_table).
+Error: syntax error at or near "from" in context "as installs, from", at line 3, column 1
+To fix: Correct the SQL at the position shown.
+At line 3, column 1:
+  from installs
+  ^
+Error type: sql_error (SQLSTATE 42601 syntax_error).
 ```
 
 The last line gives the error type and what happened to the SQL: `No SQL was run.`, which
